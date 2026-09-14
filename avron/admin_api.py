@@ -848,6 +848,27 @@ async def playground(body: PlaygroundRun, user: dict = Depends(admin)):
             raw = (data.get("choices") or [{}])[0].get("message", {}).get(
                 "content", ""
             )
+            # Playground runs are real traffic too - without this the Requests
+            # tab stays empty for anyone testing from the console.
+            if db.capture_enabled():
+                db.record_capture(
+                    route=route["prefix"],
+                    provider=upstream["name"] or upstream["url"],
+                    model=data.get("model", body.model),
+                    status=r.status_code,
+                    ms=elapsed,
+                    masked=vault.size,
+                    tokens_in=usage.get("prompt_tokens", 0) or 0,
+                    tokens_out=usage.get("completion_tokens", 0) or 0,
+                    key_name=f"playground ({user['username']})",
+                    req_raw={"messages": messages},
+                    req_masked={"messages": masked},
+                    resp_raw=data,
+                    resp_restored={"choices": [{"message": {
+                        "content": vault.restore(raw)}}]},
+                    placeholders=[{"token": t, "value": v}
+                                  for t, v in vault.to_real.items()],
+                )
             return {
                 "ok": True,
                 "sent_to_model": [

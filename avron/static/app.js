@@ -1320,7 +1320,9 @@ async function renderRequests(el) {
           { label: "", cell: (c) => `<button class="btn ghost small" data-cap="${c.id}">Open</button>` },
         ],
         d.captures,
-        d.enabled ? "Nothing recorded yet. Send a request through an endpoint." : "Recording is off."
+        d.enabled
+          ? "Nothing recorded yet. Send a request through an endpoint, or run something in the Playground."
+          : "Recording is off. Switch it on above, then send a request."
       )}
     </div>`;
 
