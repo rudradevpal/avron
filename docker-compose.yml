@@ -1,0 +1,33 @@
+name: avron
+
+services:
+  avron:
+    build: ./avron
+    image: avron:latest
+    container_name: avron
+    hostname: avron
+    ports:
+      - "8080:8080"
+    environment:
+      # The ONLY required setting. Encrypts stored API keys, so it cannot
+      # live in the database it protects. Generate once and never change it:
+      #   python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      MASTER_KEY: "REPLACE_WITH_FERNET_KEY"
+
+      DB_PATH: "/data/gateway.db"
+      # Set true when serving the console over HTTPS.
+      COOKIE_SECURE: "false"
+
+      # --- first boot only ---------------------------------------------
+      # These seed the database once. After that every one of them is
+      # edited in the console and changes here are ignored. The outbound
+      # proxy is configured in the console under Network, not here.
+      OPENAI_BASE_URL: "http://myllm.local:3001/v1"
+      OPENAI_API_KEY: ""
+      LLM_MODEL: "auto:fast"
+      USE_LLM: "true"
+      SCORE_THRESHOLD: "0.4"
+    volumes:
+      - /root/docker-storage/avron/data:/data
+      - /root/docker-storage/avron/cache:/root/.cache
+    restart: unless-stopped

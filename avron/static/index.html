@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#08090a">
+<meta name="robots" content="noindex">
+<title>AVRON</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+
+<div id="app"></div>
+<div id="modal-root"></div>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<template id="tpl-login">
+  <div class="login-screen">
+    <form class="login-card" id="login-form">
+      <h1>AVRON</h1>
+      <p>PII detection and masking for LLM traffic.</p>
+      <div id="login-error"></div>
+      <label class="field">
+        <span>Username</span>
+        <input type="text" name="username" autocomplete="username" autofocus required>
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input type="password" name="password" autocomplete="current-password" required>
+      </label>
+      <button class="btn" type="submit" style="width:100%">Sign in</button>
+      <p class="field-note" style="margin-top:18px">
+        First run? The password was printed once to the container log:
+        <code>docker logs avron 2&gt;&amp;1 | grep -A6 credentials</code>
+      </p>
+    </form>
+  </div>
+</template>
+
+<template id="tpl-shell">
+  <div class="shell">
+    <div class="topbar">
+      <button class="btn ghost small" id="menu-btn" aria-label="Menu">☰</button>
+      <div class="brand"><span class="mark" aria-hidden="true"></span>AVRON</div>
+      <div class="spacer"></div>
+      <span id="who-mobile" class="field-note" style="margin:0"></span>
+    </div>
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <div>AVRON<span>Detection and routing</span></div>
+      </div>
+      <nav class="nav" id="nav"></nav>
+      <div class="sidebar-foot">
+        <div id="who"></div>
+        <button class="btn ghost small" id="signout" style="margin-top:9px;width:100%">Sign out</button>
+      </div>
+    </aside>
+    <main class="main" id="view"></main>
+  </div>
+</template>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
