@@ -780,7 +780,7 @@ function generateModal() {
     title: "Generate a pattern",
     body: `<div class="notice info">Describe the identifier in plain words. The detection model drafts a regex, context words and test samples. Nothing is saved until you review it.</div>
       <label class="field"><span>What should it detect?</span>
-        <textarea name="description" autofocus placeholder="Our internal employee ID: the letters EMP followed by six digits"></textarea></label>
+        <textarea name="description" placeholder="Our internal employee ID: the letters EMP followed by six digits"></textarea></label>
       <label class="field"><span>Real examples (optional)</span>
         <textarea class="mono" name="examples" placeholder="EMP004512&#10;EMP991003"></textarea>
         <div class="field-note">Use fake values, not real records — this text is sent to the detection model.</div></label>`,
@@ -1036,15 +1036,15 @@ async function viewKeys(el) {
     isAdmin() ? api("/routes").catch(() => []) : Promise.resolve([]),
   ]);
   el.innerHTML =
-    head("API keys", "Keys your clients send to AVRON. They are not provider keys — AVRON swaps in the real provider credential on the way out.") +
+    head("API keys", "Keys your apps use to reach AVRON. They are not your OpenAI or provider keys — AVRON adds the real one for you.") +
     (data.required
-      ? `<div class="notice good">A key is required. Requests without a valid one are refused.</div>`
-      : `<div class="notice warn">Keys are <strong>optional</strong> right now — anyone who can reach this gateway can use it and your stored provider credentials. Turn on enforcement below once your clients are issued keys.</div>`) +
+      ? `<div class="notice good">A key is needed to use AVRON. Requests without one are turned away.</div>`
+      : `<div class="notice warn">No key is needed right now, so <strong>anyone who can reach this server can use it</strong> — and spend on your provider account. Create a key, put it in your apps, then switch this on.</div>`) +
     (isAdmin()
       ? `<div class="panel"><div class="panel-body">
           <label class="toggle"><input type="checkbox" id="require-key" ${data.required ? "checked" : ""}><span class="switch"></span>
-          <span>Require a key on the proxy and the masking API</span></label>
-          <div class="field-note">Turning this on breaks any client that is not sending one. Issue the keys first.</div>
+          <span>Ask every app for a key</span></label>
+          <div class="field-note">Any app not sending a key stops working the moment you switch this on. Set them up first.</div>
         </div></div>`
       : "") +
     `<div class="actions" style="margin-bottom:14px"><button class="btn" id="add-key">Create a key</button></div>
@@ -1052,12 +1052,12 @@ async function viewKeys(el) {
        [
          { label: "Name", cell: (k) => esc(k.name) + (k.mine ? "" : ` <span class="tag">${esc(k.owner)}</span>`) },
          { label: "Key", cell: (k) => `<code>${esc(k.prefix)}</code>` },
-         { label: "Scope", cell: (k) => (k.routes.length ? k.routes.map((r) => `<span class="tag">${esc(r)}</span>`).join(" ") : '<span class="field-note" style="margin:0">all endpoints</span>') },
+         { label: "Can use", cell: (k) => (k.routes.length ? k.routes.map((r) => `<span class="tag">${esc(r)}</span>`).join(" ") : '<span class="field-note" style="margin:0">all endpoints</span>') },
          { label: "Uses", num: true, cell: (k) => k.uses },
          { label: "Last used", cell: (k) => (k.last_used ? `<span class="field-note" style="margin:0">${esc(k.last_used.replace("T", " ").replace("+00:00", ""))}</span>` : "—") },
          { label: "Expires", cell: (k) => (k.expires_at ? esc(k.expires_at.slice(0, 10)) : "never") },
          { label: "On", cell: (k) => `<label class="toggle"><input type="checkbox" data-key="${k.id}" ${k.enabled ? "checked" : ""}><span class="switch"></span></label>` },
-         { label: "", cell: (k) => `<button class="btn danger small" data-revoke="${k.id}">Revoke</button>` },
+         { label: "", cell: (k) => `<button class="btn danger small" data-revoke="${k.id}">Delete</button>` },
        ],
        data.keys,
        "No keys yet."
@@ -1075,8 +1075,8 @@ async function viewKeys(el) {
     openModal({
       title: "Create a key",
       body: `<label class="field"><span>Name</span>
-          <input type="text" name="name" autofocus placeholder="Support bot, staging, Priya's laptop">
-          <div class="field-note">So you know what to revoke later.</div></label>
+          <input type="text" name="name" placeholder="Support bot, staging, Priya's laptop">
+          <div class="field-note">So you know which app it belongs to when you come to turn it off.</div></label>
         <label class="field"><span>Expires after</span>
           <select name="expires">
             <option value="">Never</option>
@@ -1084,8 +1084,8 @@ async function viewKeys(el) {
             <option value="90">90 days</option>
             <option value="365">A year</option>
           </select></label>
-        ${routes.length ? `<label class="field"><span>Limit to these endpoints</span>
-          <div class="field-note" style="margin:0 0 8px">Leave unticked for all of them.</div></label>
+        ${routes.length ? `<label class="field"><span>Only allow these endpoints</span>
+          <div class="field-note" style="margin:0 0 8px">Leave everything unticked to allow all of them.</div></label>
           <div class="checks">${routes.map((r) => `<label><input type="checkbox" name="scope" value="${esc(r.prefix)}"> <span class="mono">${esc(r.prefix)}</span></label>`).join("")}</div>` : ""}`,
       onSave: async (form) => {
         const r = await api("/keys", {
@@ -1112,9 +1112,9 @@ async function viewKeys(el) {
   );
   $$("[data-revoke]", el).forEach((b) =>
     b.addEventListener("click", async () => {
-      if (!confirm("Revoke this key? Anything using it stops working immediately.")) return;
+      if (!confirm("Delete this key? Any app using it stops working straight away.")) return;
       await api("/keys/" + b.dataset.revoke, { method: "DELETE" });
-      toast("Key revoked");
+      toast("Key deleted");
       go("keys");
     })
   );
@@ -1126,10 +1126,10 @@ function showKey(key) {
   wrap.innerHTML = `<div class="modal" role="dialog" aria-modal="true">
     <div class="modal-head">Your new key</div>
     <div class="modal-body">
-      <div class="notice bad">This is shown once. AVRON stores only a hash and cannot show it again.</div>
+      <div class="notice bad">Copy this now — you will not see it again. AVRON keeps only a scrambled version and cannot show you the original.</div>
       <label class="field"><span>Key</span>
         <input type="text" class="mono" id="new-key" readonly value="${esc(key)}"></label>
-      <label class="field"><span>Use it like this</span>
+      <label class="field"><span>Paste this into your app</span>
         <textarea class="mono" readonly style="min-height:96px">curl http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer ${esc(key)}" \
   -H 'Content-Type: application/json' \
@@ -1157,7 +1157,7 @@ function showKey(key) {
 async function viewUsers(el) {
   const users = await api("/users");
   el.innerHTML =
-    head("Users", "Administrators change every setting. Members can only manage their own API keys and password.") +
+    head("Users", "Administrators can change anything. Members can only manage their own API keys and password.") +
     `<div class="actions" style="margin-bottom:14px"><button class="btn" id="add-user">Add someone</button></div>
      <div class="panel">${table(
        [
@@ -1172,7 +1172,7 @@ async function viewUsers(el) {
   $("#add-user").addEventListener("click", () =>
     openModal({
       title: "Add someone",
-      body: `<label class="field"><span>Username</span><input type="text" name="username" autofocus></label>
+      body: `<label class="field"><span>Username</span><input type="text" name="username"></label>
              <label class="field"><span>Password</span><input name="password" type="password">
              <div class="field-note">At least 12 characters. Share it with them directly; it is not shown again.</div></label>
              <label class="field"><span>Role</span>
@@ -1264,10 +1264,21 @@ function openModal({ title, body, extra = "", onSave, onReady, wide }) {
     e.preventDefault();
     const button = form.querySelector('[type="submit"]');
     button.disabled = true;
-    try { await onSave(form); close(); }
-    catch (err) { toast(err.message, true); button.disabled = false; }
+    try {
+      await onSave(form);
+      // onSave may have opened a different dialog in our place (the new-key
+      // reveal, the generated-pattern editor). Closing unconditionally would
+      // wipe it, so only close if we are still the one on screen.
+      if (modalRoot.contains(wrap)) close();
+    } catch (err) {
+      toast(err.message, true);
+      button.disabled = false;
+    }
   });
   if (onReady) onReady(form);
+  // Focus here rather than with the autofocus attribute: the browser blocks
+  // autofocus when something is already focused, which it always is after a
+  // button click.
   form.querySelector("input, select, textarea")?.focus();
 }
 
