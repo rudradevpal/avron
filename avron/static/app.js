@@ -37,7 +37,7 @@ async function api(path, options = {}) {
   return data;
 }
 
-const state = { user: null, view: "overview", cache: {}, timer: null };
+const state = { user: null, view: "overview", cache: {}, timer: null, gen: 0 };
 
 /* Table helper. Every cell carries its column label so the CSS can turn
    rows into cards on a phone instead of a sideways-scrolling mess. */
@@ -138,8 +138,18 @@ function renderShell() {
 function go(view) {
   clearInterval(state.timer);
   state.view = view;
+  // Each render gets a ticket. A slow view that resolves after you have moved
+  // on must not paint over whatever is on screen now.
+  const ticket = ++state.gen;
   $$("#nav button").forEach((b) => b.setAttribute("aria-current", String(b.dataset.view === view)));
-  const el = $("#view");
+
+  // Swap in a fresh container. A slow view that finishes after you have moved
+  // on then paints into a detached node nobody can see, instead of over the
+  // screen you are looking at.
+  const el = document.createElement("main");
+  el.className = "main";
+  el.id = "view";
+  $("#view").replaceWith(el);
   el.innerHTML = `<div class="panel"><div class="skeleton"><i></i><i></i><i></i><i></i></div></div>`;
   const VIEW_FN = {
     overview: viewOverview,
@@ -164,6 +174,7 @@ function go(view) {
     return;
   }
   fn(el).catch((err) => {
+    if (ticket !== state.gen) return;
     el.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`;
   });
 }
@@ -789,13 +800,13 @@ function generateModal() {
         method: "POST",
         body: { description: form.description.value, examples: form.examples.value },
       });
-      modalRoot.replaceChildren();
-      patternModal({
-        entity: draft.entity, name: draft.name, regex: draft.regex,
-        score: draft.score, context: draft.context, validator: "none",
-        enabled: true, _sample: (draft.samples || []).join("\n"),
-      });
       toast("Drafted — check the tester before saving");
+      return () =>
+        patternModal({
+          entity: draft.entity, name: draft.name, regex: draft.regex,
+          score: draft.score, context: draft.context, validator: "none",
+          enabled: true, _sample: (draft.samples || []).join("\n"),
+        });
     },
   });
 }
@@ -1096,8 +1107,7 @@ async function viewKeys(el) {
             routes: $$('[name="scope"]:checked', form).map((c) => c.value),
           },
         });
-        modalRoot.replaceChildren();
-        showKey(r.key);
+        return () => showKey(r.key);
       },
     })
   );
@@ -1265,11 +1275,11 @@ function openModal({ title, body, extra = "", onSave, onReady, wide }) {
     const button = form.querySelector('[type="submit"]');
     button.disabled = true;
     try {
-      await onSave(form);
-      // onSave may have opened a different dialog in our place (the new-key
-      // reveal, the generated-pattern editor). Closing unconditionally would
-      // wipe it, so only close if we are still the one on screen.
-      if (modalRoot.contains(wrap)) close();
+      // onSave may return a function to run once this dialog is gone — used
+      // when one dialog hands off to another, like the new-key reveal.
+      const next = await onSave(form);
+      close();
+      if (typeof next === "function") next();
     } catch (err) {
       toast(err.message, true);
       button.disabled = false;
@@ -1305,8 +1315,11 @@ function debounce(fn, ms) {
 async function boot() {
   try {
     state.user = await api("/me");
+    // Pick the landing view before the shell renders. Calling go() afterwards
+    // starts a second render that races the first one.
+    if (state.user.must_change) state.view = "account";
+    else if (!isAdmin()) state.view = "keys";
     renderShell();
-    if (state.user.must_change) go("account");
   } catch { renderLogin(); }
 }
 
