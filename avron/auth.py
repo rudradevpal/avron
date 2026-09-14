@@ -16,12 +16,71 @@ from fastapi import Cookie, HTTPException, Request
 
 import db
 
-COOKIE = "pii_session"
+COOKIE = "avron_session"
+KEY_PREFIX = "avron-"
 
 # username -> (failure count, locked-until epoch)
 _failures: Dict[str, list] = {}
 MAX_FAILURES = 5
 LOCKOUT_SECONDS = 300
+
+
+# ------------------------------------------------------------ client keys
+def new_api_key() -> tuple:
+    """Return (full key shown once, storage hash, display prefix)."""
+    secret = secrets.token_urlsafe(32)
+    full = f"{KEY_PREFIX}{secret}"
+    return full, hash_api_key(full), full[: len(KEY_PREFIX) + 6]
+
+
+def hash_api_key(key: str) -> str:
+    """Plain SHA-256.
+
+    Unlike a password, an API key is 256 bits of machine-generated entropy, so
+    there is nothing to brute force and no reason to pay 600k PBKDF2 rounds on
+    every proxied request.
+    """
+    return hashlib.sha256(key.strip().encode()).hexdigest()
+
+
+def bearer_from(request: Request) -> str:
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        return header[7:].strip()
+    return request.headers.get("x-api-key", "").strip()
+
+
+def verify_api_key(request: Request) -> Optional[dict]:
+    """Resolve an AVRON key. Returns the key row, or None if it is absent,
+    unknown, disabled or expired."""
+    token = bearer_from(request)
+    if not token.startswith(KEY_PREFIX):
+        return None
+    row = db.db().execute(
+        "SELECT k.*, u.username FROM api_keys k "
+        "LEFT JOIN users u ON u.id = k.user_id WHERE k.key_hash = ?",
+        (hash_api_key(token),),
+    ).fetchone()
+    if not row or not row["enabled"]:
+        return None
+    if row["expires_at"] and row["expires_at"] < datetime.now(timezone.utc).isoformat():
+        return None
+    return dict(row)
+
+
+def touch_api_key(key_id: int) -> None:
+    try:
+        db.db().execute(
+            "UPDATE api_keys SET last_used=?, uses=uses+1 WHERE id=?",
+            (db.now(), key_id),
+        )
+        db.db().commit()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def client_key_required() -> bool:
+    return db.get_setting("require_client_key", "false") == "true"
 
 
 # ------------------------------------------------------------- passwords
@@ -106,12 +165,20 @@ def logout(token: str) -> None:
     db.db().commit()
 
 
+def require_admin(request: Request) -> dict:
+    """Admin-only console actions. Everything that changes shared state."""
+    user = current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "This action needs an administrator account.")
+    return user
+
+
 def current_user(request: Request) -> dict:
     token = request.cookies.get(COOKIE)
     if not token:
         raise HTTPException(401, "Not authenticated")
     row = db.db().execute(
-        "SELECT u.id, u.username, u.must_change, s.expires_at "
+        "SELECT u.id, u.username, u.must_change, u.role, s.expires_at "
         "FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token=?",
         (token,),
     ).fetchone()

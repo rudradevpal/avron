@@ -89,19 +89,28 @@ function renderLogin(message) {
 const VIEWS = [
   ["Traffic", [["overview", "Overview"], ["routes", "Endpoints"], ["playground", "Playground"], ["analytics", "Analytics"]]],
   ["Detection", [["detection", "Entities"], ["patterns", "Patterns"], ["test", "Scan text"]]],
-  ["Setup", [["llm", "Detection model"], ["network", "Egress"], ["users", "Users"], ["activity", "Audit log"], ["account", "Your account"]]],
+  ["Setup", [["llm", "Detection model"], ["network", "Egress"], ["users", "Users"], ["activity", "Audit log"]]],
+  ["You", [["keys", "API keys"], ["account", "Your account"]]],
 ];
+
+// Everything outside the "You" group changes shared configuration.
+const ADMIN_ONLY = new Set(
+  VIEWS.filter(([g]) => g !== "You").flatMap(([, items]) => items.map(([id]) => id))
+);
+const isAdmin = () => state.user?.role === "admin";
 const FLAT = VIEWS.flatMap(([, items]) => items);
 
 function renderShell() {
   app.replaceChildren($("#tpl-shell").content.cloneNode(true));
   const nav = $("#nav");
   VIEWS.forEach(([group, items]) => {
+    const visible = items.filter(([id]) => isAdmin() || !ADMIN_ONLY.has(id));
+    if (!visible.length) return;
     const g = document.createElement("div");
     g.className = "group";
     g.textContent = group;
     nav.appendChild(g);
-    items.forEach(([id, label]) => {
+    visible.forEach(([id, label]) => {
       const b = document.createElement("button");
       b.textContent = label;
       b.dataset.view = id;
@@ -112,7 +121,9 @@ function renderShell() {
       nav.appendChild(b);
     });
   });
-  $("#who").textContent = state.user.username;
+  $("#who").innerHTML =
+    esc(state.user.username) +
+    (isAdmin() ? ' <span class="tag">admin</span>' : "");
   $("#who-mobile").textContent = state.user.username;
   $("#menu-btn").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
   $("#signout").addEventListener("click", async () => {
@@ -120,6 +131,7 @@ function renderShell() {
     state.user = null;
     renderLogin("You have signed out.");
   });
+  if (ADMIN_ONLY.has(state.view) && !isAdmin()) state.view = "keys";
   go(state.view);
 }
 
@@ -1002,15 +1014,140 @@ Joint holder Lakshmi Narayanan, A/c 50100234567890 IFSC HDFC0001234, 12/3 Kalpan
   });
 }
 
+/* ============================================================= api keys */
+async function viewKeys(el) {
+  const [data, routes] = await Promise.all([
+    api("/keys"),
+    isAdmin() ? api("/routes").catch(() => []) : Promise.resolve([]),
+  ]);
+  el.innerHTML =
+    head("API keys", "Keys your clients send to AVRON. They are not provider keys — AVRON swaps in the real provider credential on the way out.") +
+    (data.required
+      ? `<div class="notice good">A key is required. Requests without a valid one are refused.</div>`
+      : `<div class="notice warn">Keys are <strong>optional</strong> right now — anyone who can reach this gateway can use it and your stored provider credentials. Turn on enforcement below once your clients are issued keys.</div>`) +
+    (isAdmin()
+      ? `<div class="panel"><div class="panel-body">
+          <label class="toggle"><input type="checkbox" id="require-key" ${data.required ? "checked" : ""}><span class="switch"></span>
+          <span>Require a key on the proxy and the masking API</span></label>
+          <div class="field-note">Turning this on breaks any client that is not sending one. Issue the keys first.</div>
+        </div></div>`
+      : "") +
+    `<div class="actions" style="margin-bottom:14px"><button class="btn" id="add-key">Create a key</button></div>
+     <div class="panel">${table(
+       [
+         { label: "Name", cell: (k) => esc(k.name) + (k.mine ? "" : ` <span class="tag">${esc(k.owner)}</span>`) },
+         { label: "Key", cell: (k) => `<code>${esc(k.prefix)}</code>` },
+         { label: "Scope", cell: (k) => (k.routes.length ? k.routes.map((r) => `<span class="tag">${esc(r)}</span>`).join(" ") : '<span class="field-note" style="margin:0">all endpoints</span>') },
+         { label: "Uses", num: true, cell: (k) => k.uses },
+         { label: "Last used", cell: (k) => (k.last_used ? `<span class="field-note" style="margin:0">${esc(k.last_used.replace("T", " ").replace("+00:00", ""))}</span>` : "—") },
+         { label: "Expires", cell: (k) => (k.expires_at ? esc(k.expires_at.slice(0, 10)) : "never") },
+         { label: "On", cell: (k) => `<label class="toggle"><input type="checkbox" data-key="${k.id}" ${k.enabled ? "checked" : ""}><span class="switch"></span></label>` },
+         { label: "", cell: (k) => `<button class="btn danger small" data-revoke="${k.id}">Revoke</button>` },
+       ],
+       data.keys,
+       "No keys yet."
+     )}</div>`;
+
+  $("#require-key")?.addEventListener("change", async (e) => {
+    try {
+      await api("/settings", { method: "PUT", body: { require_client_key: e.target.checked } });
+      toast(e.target.checked ? "A key is now required" : "Keys are optional again");
+      go("keys");
+    } catch (err) { e.target.checked = !e.target.checked; toast(err.message, true); }
+  });
+
+  $("#add-key").addEventListener("click", () =>
+    openModal({
+      title: "Create a key",
+      body: `<label class="field"><span>Name</span>
+          <input type="text" name="name" autofocus placeholder="Support bot, staging, Priya's laptop">
+          <div class="field-note">So you know what to revoke later.</div></label>
+        <label class="field"><span>Expires after</span>
+          <select name="expires">
+            <option value="">Never</option>
+            <option value="30">30 days</option>
+            <option value="90">90 days</option>
+            <option value="365">A year</option>
+          </select></label>
+        ${routes.length ? `<label class="field"><span>Limit to these endpoints</span>
+          <div class="field-note" style="margin:0 0 8px">Leave unticked for all of them.</div></label>
+          <div class="checks">${routes.map((r) => `<label><input type="checkbox" name="scope" value="${esc(r.prefix)}"> <span class="mono">${esc(r.prefix)}</span></label>`).join("")}</div>` : ""}`,
+      onSave: async (form) => {
+        const r = await api("/keys", {
+          method: "POST",
+          body: {
+            name: form.name.value,
+            expires_days: form.expires.value ? Number(form.expires.value) : null,
+            routes: $$('[name="scope"]:checked', form).map((c) => c.value),
+          },
+        });
+        modalRoot.replaceChildren();
+        showKey(r.key);
+      },
+    })
+  );
+
+  $$("[data-key]", el).forEach((cb) =>
+    cb.addEventListener("change", async () => {
+      try {
+        await api("/keys/" + cb.dataset.key, { method: "PUT", body: { enabled: cb.checked } });
+        toast(cb.checked ? "Key enabled" : "Key disabled");
+      } catch (e) { cb.checked = !cb.checked; toast(e.message, true); }
+    })
+  );
+  $$("[data-revoke]", el).forEach((b) =>
+    b.addEventListener("click", async () => {
+      if (!confirm("Revoke this key? Anything using it stops working immediately.")) return;
+      await api("/keys/" + b.dataset.revoke, { method: "DELETE" });
+      toast("Key revoked");
+      go("keys");
+    })
+  );
+}
+
+function showKey(key) {
+  const wrap = document.createElement("div");
+  wrap.className = "backdrop";
+  wrap.innerHTML = `<div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-head">Your new key</div>
+    <div class="modal-body">
+      <div class="notice bad">This is shown once. AVRON stores only a hash and cannot show it again.</div>
+      <label class="field"><span>Key</span>
+        <input type="text" class="mono" id="new-key" readonly value="${esc(key)}"></label>
+      <label class="field"><span>Use it like this</span>
+        <textarea class="mono" readonly style="min-height:96px">curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer ${esc(key)}" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}'</textarea></label>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="copy-key">Copy key</button>
+      <button class="btn" id="done-key">I have saved it</button>
+    </div></div>`;
+  modalRoot.replaceChildren(wrap);
+  $("#new-key", wrap).select();
+  $("#copy-key", wrap).addEventListener("click", async () => {
+    const input = $("#new-key", wrap);
+    input.select();
+    try { await navigator.clipboard.writeText(key); toast("Copied"); }
+    catch { document.execCommand("copy"); toast("Copied"); }
+  });
+  $("#done-key", wrap).addEventListener("click", () => {
+    modalRoot.replaceChildren();
+    go("keys");
+  });
+}
+
 /* ================================================================ users */
 async function viewUsers(el) {
   const users = await api("/users");
   el.innerHTML =
-    head("Users", "Everyone here can change every setting. There are no restricted roles.") +
+    head("Users", "Administrators change every setting. Members can only manage their own API keys and password.") +
     `<div class="actions" style="margin-bottom:14px"><button class="btn" id="add-user">Add someone</button></div>
      <div class="panel">${table(
        [
          { label: "Username", cell: (u) => esc(u.username) + (u.must_change ? " " + pill("warn", "must change password") : "") },
+         { label: "Role", cell: (u) => (u.role === "admin" ? pill("info", "administrator") : pill("idle", "member")) },
          { label: "Added", cell: (u) => `<span class="field-note" style="margin:0">${esc(u.created_at.slice(0, 10))}</span>` },
          { label: "", cell: (u) => `<button class="btn danger small" data-del="${u.id}">Remove</button>` },
        ],
@@ -1022,9 +1159,14 @@ async function viewUsers(el) {
       title: "Add someone",
       body: `<label class="field"><span>Username</span><input type="text" name="username" autofocus></label>
              <label class="field"><span>Password</span><input name="password" type="password">
-             <div class="field-note">At least 12 characters. Share it with them directly; it is not shown again.</div></label>`,
+             <div class="field-note">At least 12 characters. Share it with them directly; it is not shown again.</div></label>
+             <label class="field"><span>Role</span>
+               <select name="role">
+                 <option value="user">Member — own API keys and password only</option>
+                 <option value="admin">Administrator — everything</option>
+               </select></label>`,
       onSave: async (form) => {
-        await api("/users", { method: "POST", body: { username: form.username.value, password: form.password.value } });
+        await api("/users", { method: "POST", body: { username: form.username.value, password: form.password.value, role: form.role.value } });
         toast("Added");
         go("users");
       },

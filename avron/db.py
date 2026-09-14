@@ -60,6 +60,20 @@ CREATE TABLE IF NOT EXISTS users (
     must_change   INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS api_keys (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_hash    TEXT UNIQUE NOT NULL,
+    prefix      TEXT NOT NULL,
+    name        TEXT NOT NULL DEFAULT '',
+    user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT,
+    last_used   TEXT,
+    uses        INTEGER NOT NULL DEFAULT 0,
+    routes      TEXT NOT NULL DEFAULT '[]'
+);
+CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
 CREATE TABLE IF NOT EXISTS sessions (
     token      TEXT PRIMARY KEY,
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -158,6 +172,9 @@ DEFAULT_SETTINGS = {
     "proxy_enabled": "false",
     "proxy_url": "",  # stored encrypted, carries credentials
     "proxy_bypass": "localhost,127.0.0.1,avron",
+    # When on, proxy and masking requests need an AVRON key. Off by default so
+    # an upgrade does not break clients that are already pointed at it.
+    "require_client_key": "false",
 }
 
 
@@ -275,6 +292,13 @@ def _migrate() -> None:
         db().execute("ALTER TABLE routes ADD COLUMN retries INTEGER NOT NULL DEFAULT 2")
 
     ucols = {r["name"] for r in db().execute("PRAGMA table_info(upstreams)")}
+    ucols_users = {r["name"] for r in db().execute("PRAGMA table_info(users)")}
+    if "role" not in ucols_users:
+        # Existing accounts were all administrators, so that is what they stay.
+        db().execute(
+            "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'"
+        )
+
     if "provider_type" not in ucols:
         db().execute(
             "ALTER TABLE upstreams ADD COLUMN provider_type TEXT NOT NULL "
@@ -440,8 +464,8 @@ def init(seed_recognizers: List[dict], all_entities: List[str]) -> Optional[str]
 
             first_password = secrets.token_urlsafe(12)
             db().execute(
-                "INSERT INTO users(username,password_hash,must_change,created_at) "
-                "VALUES(?,?,1,?)",
+                "INSERT INTO users(username,password_hash,must_change,created_at,"
+                "role) VALUES(?,?,1,?,'admin')",
                 ("admin", hash_password(first_password), now()),
             )
             audit("system", "bootstrap", "created admin user")

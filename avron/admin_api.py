@@ -4,6 +4,8 @@ import json
 import re
 from typing import List, Optional
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
@@ -23,6 +25,10 @@ router = APIRouter(prefix="/api", tags=["admin"])
 
 def me(request: Request) -> dict:
     return auth.current_user(request)
+
+
+def admin(request: Request) -> dict:
+    return auth.require_admin(request)
 
 
 # ------------------------------------------------------------------ auth
@@ -57,7 +63,11 @@ def do_logout(request: Request, response: Response):
 
 @router.get("/me")
 def whoami(user: dict = Depends(me)):
-    return {"username": user["username"], "must_change": bool(user["must_change"])}
+    return {
+        "username": user["username"],
+        "role": user.get("role", "admin"),
+        "must_change": bool(user["must_change"]),
+    }
 
 
 class PasswordChange(BaseModel):
@@ -84,11 +94,95 @@ def change_password(body: PasswordChange, user: dict = Depends(me)):
     return {"ok": True}
 
 
+# ------------------------------------------------------------ client keys
+class KeyIn(BaseModel):
+    name: str = ""
+    expires_days: Optional[int] = None
+    routes: List[str] = []
+
+
+def _key_row(r, mine: bool) -> dict:
+    return {
+        "id": r["id"], "name": r["name"], "prefix": r["prefix"] + "…",
+        "owner": r["username"] or "(deleted)", "enabled": bool(r["enabled"]),
+        "created_at": r["created_at"], "expires_at": r["expires_at"],
+        "last_used": r["last_used"], "uses": r["uses"],
+        "routes": json.loads(r["routes"] or "[]"), "mine": mine,
+    }
+
+
+@router.get("/keys")
+def list_keys(user: dict = Depends(me)):
+    """Admins see every key; everyone else sees only their own."""
+    sql = ("SELECT k.*, u.username FROM api_keys k "
+           "LEFT JOIN users u ON u.id = k.user_id ")
+    if user.get("role") == "admin":
+        rows = db.db().execute(sql + "ORDER BY k.id DESC").fetchall()
+    else:
+        rows = db.db().execute(
+            sql + "WHERE k.user_id = ? ORDER BY k.id DESC", (user["id"],)
+        ).fetchall()
+    return {
+        "required": auth.client_key_required(),
+        "keys": [_key_row(r, r["user_id"] == user["id"]) for r in rows],
+    }
+
+
+@router.post("/keys")
+def create_key(body: KeyIn, user: dict = Depends(me)):
+    """The full key is returned once and never stored in recoverable form."""
+    full, digest, prefix = auth.new_api_key()
+    expires = None
+    if body.expires_days and body.expires_days > 0:
+        expires = (
+            datetime.now(timezone.utc) + timedelta(days=body.expires_days)
+        ).isoformat(timespec="seconds")
+    cur = db.db().execute(
+        "INSERT INTO api_keys(key_hash,prefix,name,user_id,enabled,created_at,"
+        "expires_at,routes) VALUES(?,?,?,?,1,?,?,?)",
+        (digest, prefix, body.name.strip()[:60] or "unnamed", user["id"],
+         db.now(), expires, json.dumps(body.routes)),
+    )
+    db.db().commit()
+    db.audit(user["username"], "key_create", body.name or "unnamed")
+    return {"id": cur.lastrowid, "key": full,
+            "note": "Copy this now. It is not shown again."}
+
+
+@router.put("/keys/{kid}")
+def toggle_key(kid: int, body: dict, user: dict = Depends(me)):
+    row = db.db().execute("SELECT * FROM api_keys WHERE id=?", (kid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Key not found.")
+    if row["user_id"] != user["id"] and user.get("role") != "admin":
+        raise HTTPException(403, "That key belongs to someone else.")
+    db.db().execute(
+        "UPDATE api_keys SET enabled=?, name=COALESCE(?,name) WHERE id=?",
+        (1 if body.get("enabled") else 0, (body.get("name") or None), kid),
+    )
+    db.db().commit()
+    db.audit(user["username"], "key_update", row["name"])
+    return {"ok": True}
+
+
+@router.delete("/keys/{kid}")
+def revoke_key(kid: int, user: dict = Depends(me)):
+    row = db.db().execute("SELECT * FROM api_keys WHERE id=?", (kid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Key not found.")
+    if row["user_id"] != user["id"] and user.get("role") != "admin":
+        raise HTTPException(403, "That key belongs to someone else.")
+    db.db().execute("DELETE FROM api_keys WHERE id=?", (kid,))
+    db.db().commit()
+    db.audit(user["username"], "key_revoke", row["name"])
+    return {"ok": True}
+
+
 # ----------------------------------------------------------------- users
 @router.get("/users")
-def list_users(user: dict = Depends(me)):
+def list_users(user: dict = Depends(admin)):
     rows = db.db().execute(
-        "SELECT id, username, created_at, must_change FROM users ORDER BY id"
+        "SELECT id, username, created_at, must_change, role FROM users ORDER BY id"
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -96,10 +190,11 @@ def list_users(user: dict = Depends(me)):
 class NewUser(BaseModel):
     username: str
     password: str
+    role: str = "user"
 
 
 @router.post("/users")
-def add_user(body: NewUser, user: dict = Depends(me)):
+def add_user(body: NewUser, user: dict = Depends(admin)):
     name = body.username.strip()
     if not re.fullmatch(r"[a-zA-Z0-9._-]{3,32}", name):
         raise HTTPException(400, "Username must be 3-32 chars: letters, digits . _ -")
@@ -108,9 +203,10 @@ def add_user(body: NewUser, user: dict = Depends(me)):
         raise HTTPException(400, problem)
     try:
         db.db().execute(
-            "INSERT INTO users(username,password_hash,must_change,created_at) "
-            "VALUES(?,?,0,?)",
-            (name, auth.hash_password(body.password), db.now()),
+            "INSERT INTO users(username,password_hash,must_change,created_at,"
+            "role) VALUES(?,?,0,?,?)",
+            (name, auth.hash_password(body.password), db.now(),
+             "admin" if body.role == "admin" else "user"),
         )
         db.db().commit()
     except Exception:  # noqa: BLE001
@@ -120,12 +216,17 @@ def add_user(body: NewUser, user: dict = Depends(me)):
 
 
 @router.delete("/users/{user_id}")
-def remove_user(user_id: int, user: dict = Depends(me)):
+def remove_user(user_id: int, user: dict = Depends(admin)):
     if user_id == user["id"]:
         raise HTTPException(400, "You cannot delete your own account.")
-    count = db.db().execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
-    if count <= 1:
-        raise HTTPException(400, "At least one account must remain.")
+    admins = db.db().execute(
+        "SELECT COUNT(*) c FROM users WHERE role='admin'"
+    ).fetchone()["c"]
+    target = db.db().execute(
+        "SELECT role FROM users WHERE id=?", (user_id,)
+    ).fetchone()
+    if target and target["role"] == "admin" and admins <= 1:
+        raise HTTPException(400, "At least one administrator must remain.")
     db.db().execute("DELETE FROM users WHERE id=?", (user_id,))
     db.db().commit()
     db.audit(user["username"], "user_delete", str(user_id))
@@ -137,7 +238,7 @@ SECRET_KEYS = {"llm_token", "crypto_key", "proxy_url"}
 
 
 @router.get("/settings")
-def get_settings(user: dict = Depends(me)):
+def get_settings(user: dict = Depends(admin)):
     out = {}
     for key, value in db.all_settings().items():
         # Secrets are never returned. The UI shows whether one is set.
@@ -151,7 +252,7 @@ def get_settings(user: dict = Depends(me)):
 
 
 @router.put("/settings")
-def put_settings(body: dict, user: dict = Depends(me)):
+def put_settings(body: dict, user: dict = Depends(admin)):
     changed = []
     for key, value in body.items():
         if key.startswith("_"):
@@ -173,7 +274,7 @@ def put_settings(body: dict, user: dict = Depends(me)):
 
 # -------------------------------------------------------------- entities
 @router.get("/entities")
-def get_entities(user: dict = Depends(me)):
+def get_entities(user: dict = Depends(admin)):
     rows = db.db().execute("SELECT * FROM entity_toggles ORDER BY entity").fetchall()
     counts = {
         r["entity"]: r["n"]
@@ -196,7 +297,7 @@ def get_entities(user: dict = Depends(me)):
 
 
 @router.put("/entities")
-def put_entities(body: List[dict], user: dict = Depends(me)):
+def put_entities(body: List[dict], user: dict = Depends(admin)):
     for item in body:
         db.db().execute(
             "INSERT INTO entity_toggles(entity,enabled) VALUES(?,?) "
@@ -221,7 +322,7 @@ class PatternIn(BaseModel):
 
 
 @router.get("/patterns")
-def list_patterns(user: dict = Depends(me)):
+def list_patterns(user: dict = Depends(admin)):
     rows = db.db().execute("SELECT * FROM patterns ORDER BY entity, id").fetchall()
     return [
         {**dict(r), "context": json.loads(r["context"] or "[]"),
@@ -242,7 +343,7 @@ def _validate(p: PatternIn):
 
 
 @router.post("/patterns")
-def add_pattern(p: PatternIn, user: dict = Depends(me)):
+def add_pattern(p: PatternIn, user: dict = Depends(admin)):
     _validate(p)
     cur = db.db().execute(
         "INSERT INTO patterns(pack,entity,name,regex,score,context,validator,"
@@ -259,7 +360,7 @@ def add_pattern(p: PatternIn, user: dict = Depends(me)):
 
 
 @router.put("/patterns/{pid}")
-def edit_pattern(pid: int, p: PatternIn, user: dict = Depends(me)):
+def edit_pattern(pid: int, p: PatternIn, user: dict = Depends(admin)):
     _validate(p)
     before = db.db().execute("SELECT * FROM patterns WHERE id=?", (pid,)).fetchone()
     if not before:
@@ -288,7 +389,7 @@ def edit_pattern(pid: int, p: PatternIn, user: dict = Depends(me)):
 
 
 @router.delete("/patterns/{pid}")
-def remove_pattern(pid: int, user: dict = Depends(me)):
+def remove_pattern(pid: int, user: dict = Depends(admin)):
     db.db().execute("DELETE FROM patterns WHERE id=?", (pid,))
     db.db().commit()
     config.reload()
@@ -314,7 +415,7 @@ class PatternTest(BaseModel):
 
 
 @router.post("/patterns/test")
-def test_pattern(body: PatternTest, user: dict = Depends(me)):
+def test_pattern(body: PatternTest, user: dict = Depends(admin)):
     problem = regex_problem(body.regex)
     if problem:
         return {"error": problem, "matches": []}
@@ -378,12 +479,12 @@ def _check_prefix(prefix: str) -> str:
 
 
 @router.get("/strategies")
-def strategies(user: dict = Depends(me)):
+def strategies(user: dict = Depends(admin)):
     return STRATEGIES
 
 
 @router.get("/routes")
-def list_routes(user: dict = Depends(me)):
+def list_routes(user: dict = Depends(admin)):
     out = []
     for r in config.routes():
         r = dict(r)
@@ -405,7 +506,7 @@ def list_routes(user: dict = Depends(me)):
 
 
 @router.get("/routes/{rid}/health")
-def route_health(rid: int, user: dict = Depends(me)):
+def route_health(rid: int, user: dict = Depends(admin)):
     row = db.db().execute("SELECT * FROM routes WHERE id=?", (rid,)).fetchone()
     if not row:
         raise HTTPException(404, "Endpoint not found.")
@@ -455,7 +556,7 @@ def _save_upstreams(route_id: int, items: List[UpstreamIn]):
 
 
 @router.post("/routes")
-def add_route(body: RouteIn, user: dict = Depends(me)):
+def add_route(body: RouteIn, user: dict = Depends(admin)):
     prefix = _check_prefix(body.prefix)
     if body.strategy not in STRATEGIES:
         raise HTTPException(400, "Unknown strategy.")
@@ -480,7 +581,7 @@ def add_route(body: RouteIn, user: dict = Depends(me)):
 
 
 @router.put("/routes/{rid}")
-def edit_route(rid: int, body: RouteIn, user: dict = Depends(me)):
+def edit_route(rid: int, body: RouteIn, user: dict = Depends(admin)):
     prefix = _check_prefix(body.prefix)
     if body.strategy not in STRATEGIES:
         raise HTTPException(400, "Unknown strategy.")
@@ -503,7 +604,7 @@ def edit_route(rid: int, body: RouteIn, user: dict = Depends(me)):
 
 
 @router.delete("/routes/{rid}")
-def remove_route(rid: int, user: dict = Depends(me)):
+def remove_route(rid: int, user: dict = Depends(admin)):
     db.db().execute("DELETE FROM upstreams WHERE route_id=?", (rid,))
     db.db().execute("DELETE FROM routes WHERE id=?", (rid,))
     db.db().commit()
@@ -520,7 +621,7 @@ class UpstreamTest(BaseModel):
 
 
 @router.post("/upstreams/test")
-async def test_upstream(body: UpstreamTest, user: dict = Depends(me)):
+async def test_upstream(body: UpstreamTest, user: dict = Depends(admin)):
     import httpx
 
     token = body.token
@@ -555,7 +656,7 @@ class TestText(BaseModel):
 
 
 @router.post("/test/detect")
-async def test_detect(body: TestText, user: dict = Depends(me)):
+async def test_detect(body: TestText, user: dict = Depends(admin)):
     from openai_proxy import analyze_text
 
     results = await analyze_text(body.text, None, body.use_llm)
@@ -570,7 +671,7 @@ async def test_detect(body: TestText, user: dict = Depends(me)):
 
 
 @router.post("/test/llm")
-async def test_llm(user: dict = Depends(me)):
+async def test_llm(user: dict = Depends(admin)):
     import httpx
 
     cfg = config.llm()
@@ -601,7 +702,7 @@ class ProxyTest(BaseModel):
 
 
 @router.post("/test/proxy")
-async def test_proxy(body: ProxyTest, user: dict = Depends(me)):
+async def test_proxy(body: ProxyTest, user: dict = Depends(admin)):
     import net
 
     return await net.check(body.url or None)
@@ -609,7 +710,7 @@ async def test_proxy(body: ProxyTest, user: dict = Depends(me)):
 
 # ---------------------------------------------------------- playground
 @router.get("/routes/{rid}/models")
-async def route_models(rid: int, user: dict = Depends(me)):
+async def route_models(rid: int, user: dict = Depends(admin)):
     """Model catalogue from every upstream on a route, merged."""
     import net
 
@@ -666,7 +767,7 @@ class PlaygroundRun(BaseModel):
 
 
 @router.post("/playground")
-async def playground(body: PlaygroundRun, user: dict = Depends(me)):
+async def playground(body: PlaygroundRun, user: dict = Depends(admin)):
     """Run a prompt through the full pipeline and show every stage.
 
     The point is to make the masking visible: what you typed, what the model
@@ -772,7 +873,7 @@ async def playground(body: PlaygroundRun, user: dict = Depends(me)):
 
 
 @router.get("/providers")
-def provider_catalogue(user: dict = Depends(me)):
+def provider_catalogue(user: dict = Depends(admin)):
     import providers
 
     return providers.catalogue()
@@ -780,7 +881,7 @@ def provider_catalogue(user: dict = Depends(me)):
 
 # ---------------------------------------------------------------- packs
 @router.get("/packs")
-def list_packs(user: dict = Depends(me)):
+def list_packs(user: dict = Depends(admin)):
     return config.packs()
 
 
@@ -790,7 +891,7 @@ class PackToggle(BaseModel):
 
 
 @router.put("/packs")
-def set_pack(body: PackToggle, user: dict = Depends(me)):
+def set_pack(body: PackToggle, user: dict = Depends(admin)):
     """Enabling a pack switches on the patterns that shipped with it, and
     leaves anything you edited or added yourself alone."""
     db.db().execute(
@@ -828,7 +929,7 @@ def _percentile(values, pct):
 
 
 @router.get("/analytics")
-def analytics(user: dict = Depends(me)):
+def analytics(user: dict = Depends(admin)):
     """Latency distribution and token use per provider.
 
     Percentiles come from the stored samples rather than a running mean: an
@@ -898,7 +999,7 @@ Rules:
 
 
 @router.post("/patterns/generate")
-async def generate_pattern(body: PatternDraft, user: dict = Depends(me)):
+async def generate_pattern(body: PatternDraft, user: dict = Depends(admin)):
     import json as _json
 
     import httpx
@@ -960,7 +1061,7 @@ async def generate_pattern(body: PatternDraft, user: dict = Depends(me)):
 
 
 @router.get("/stats")
-def stats(user: dict = Depends(me)):
+def stats(user: dict = Depends(admin)):
     rows = db.db().execute(
         "SELECT day, hour, route, requests, masked, errors FROM stats "
         "ORDER BY day DESC, hour DESC LIMIT 48"
@@ -978,7 +1079,7 @@ def stats(user: dict = Depends(me)):
 
 
 @router.get("/audit")
-def audit_log(user: dict = Depends(me)):
+def audit_log(user: dict = Depends(admin)):
     rows = db.db().execute(
         "SELECT ts, actor, action, detail FROM audit ORDER BY id DESC LIMIT 200"
     ).fetchall()

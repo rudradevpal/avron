@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from presidio_anonymizer import AnonymizerEngine, DeanonymizeEngine
@@ -23,6 +23,24 @@ app = FastAPI(title="AVRON", version="2.0", docs_url=None, redoc_url=None)
 
 anonymizer = AnonymizerEngine()
 deanonymizer = DeanonymizeEngine()
+
+
+def require_key(request: Request):
+    """Guard for the masking API. Open unless require_client_key is on, so an
+    upgrade does not break callers that are already pointed at it."""
+    import auth
+
+    key = auth.verify_api_key(request)
+    if key:
+        auth.touch_api_key(key["id"])
+        return key
+    if auth.client_key_required():
+        raise HTTPException(
+            status_code=401,
+            detail="A valid AVRON API key is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return None
 
 
 def dedupe(results):
@@ -111,7 +129,7 @@ def health():
 
 
 @app.post("/analyze")
-async def analyze(req: AnalyzeRequest):
+async def analyze(req: AnalyzeRequest, _key=Depends(require_key)):
     from openai_proxy import analyze_text
 
     results = await analyze_text(req.text, req.entities, req.use_llm)
@@ -126,7 +144,7 @@ async def analyze(req: AnalyzeRequest):
 
 
 @app.post("/anonymize")
-async def anonymize(req: AnonymizeRequest):
+async def anonymize(req: AnonymizeRequest, _key=Depends(require_key)):
     from openai_proxy import analyze_text
 
     results = await analyze_text(req.text, req.entities, req.use_llm)
@@ -145,7 +163,7 @@ class DeanonymizeRequest(BaseModel):
 
 
 @app.post("/deanonymize")
-def deanonymize(req: DeanonymizeRequest):
+def deanonymize(req: DeanonymizeRequest, _key=Depends(require_key)):
     from presidio_anonymizer.entities import OperatorResult
 
     out = deanonymizer.deanonymize(

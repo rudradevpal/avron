@@ -15,6 +15,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+import auth
 import db
 import net
 import providers
@@ -160,7 +161,29 @@ def _prepare(upstream: dict, rest: str, headers: dict, body):
 async def proxy(full_path: str, request: Request):
     route = config.match_route("/" + full_path)
     if route is None:
-        return JSONResponse(status_code=404, content={"error": "No endpoint configured for this path"})
+        return JSONResponse(
+            status_code=404,
+            content={"error": "No endpoint configured for this path"},
+        )
+
+    # An AVRON key authenticates the caller and is consumed here; it is never
+    # forwarded. A provider key stored on the endpoint replaces it.
+    client_key = auth.verify_api_key(request)
+    if client_key:
+        allowed = json.loads(client_key.get("routes") or "[]")
+        if allowed and route["prefix"] not in allowed:
+            return JSONResponse(
+                status_code=403,
+                content={"error": f"This key is not permitted on {route['prefix']}"},
+            )
+        auth.touch_api_key(client_key["id"])
+    elif auth.client_key_required():
+        return JSONResponse(
+            status_code=401,
+            content={"error": "A valid AVRON API key is required.",
+                     "hint": "Send it as: Authorization: Bearer avron-..."},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     candidates = pool.order(route["upstreams"], route["strategy"])
     if not candidates:
