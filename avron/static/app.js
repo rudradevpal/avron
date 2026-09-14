@@ -141,13 +141,28 @@ function go(view) {
   $$("#nav button").forEach((b) => b.setAttribute("aria-current", String(b.dataset.view === view)));
   const el = $("#view");
   el.innerHTML = `<div class="panel"><div class="skeleton"><i></i><i></i><i></i><i></i></div></div>`;
-  const fn = {
-    overview: viewOverview, routes: viewRoutes, playground: viewPlayground,
+  const VIEW_FN = {
+    overview: viewOverview,
+    routes: viewRoutes,
+    playground: viewPlayground,
     analytics: viewAnalytics,
-    detection: viewDetection, patterns: viewPatterns, test: viewTest,
-    llm: viewLlm, network: viewNetwork, users: viewUsers,
-    activity: viewActivity, account: viewAccount,
-  }[view];
+    detection: viewDetection,
+    patterns: viewPatterns,
+    test: viewTest,
+    llm: viewLlm,
+    network: viewNetwork,
+    keys: viewKeys,
+    users: viewUsers,
+    activity: viewActivity,
+    account: viewAccount,
+  };
+  const fn = VIEW_FN[view];
+  if (typeof fn !== "function") {
+    // A nav entry without a handler would otherwise leave the skeleton up
+    // forever with only a console error to show for it.
+    el.innerHTML = `<div class="notice bad">No screen is wired up for "${esc(view)}".</div>`;
+    return;
+  }
   fn(el).catch((err) => {
     el.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`;
   });
