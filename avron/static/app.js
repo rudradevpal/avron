@@ -1371,6 +1371,10 @@ function textOf(payload) {
       })
       .join("\n\n");
   }
+  if (payload.streamed && typeof payload.content === "string") {
+    return payload.content || "(the stream ended before any text arrived)";
+  }
+  if (payload.note) return payload.note;
   const choice = payload.choices?.[0]?.message;
   if (choice) return choice.content ?? JSON.stringify(choice, null, 2);
   if (payload.error) return typeof payload.error === "string" ? payload.error : JSON.stringify(payload.error, null, 2);
@@ -1406,7 +1410,7 @@ async function openCapture(id) {
             <div>${hl(textOf(c.req_masked))}</div></div>
         </div>
         <div>
-          <div class="stage mono"><header>What the model replied<span>masked</span></header>
+          <div class="stage mono"><header>What the model replied<span>${c.resp_raw?.streamed ? "streamed, masked" : "masked"}</span></header>
             <div>${hl(textOf(c.resp_raw))}</div></div>
           <div class="stage mono"><header>What your app got back<span>restored</span></header>
             <div>${esc(textOf(c.resp_restored))}</div></div>

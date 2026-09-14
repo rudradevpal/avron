@@ -236,26 +236,23 @@ async def proxy(full_path: str, request: Request):
                     raise RuntimeError(f"{response.status_code} {detail}")
                 pool.record_success(upstream["id"], time.monotonic() - started)
                 db.bump_stats(route["prefix"], masked=vault.size)
-                if db.capture_enabled():
-                    # The body is relayed as it arrives and never assembled, so
-                    # only the request side can be stored. Without this a
-                    # streaming client would leave the Requests tab empty.
-                    db.record_capture(
-                        route=route["prefix"],
-                        provider=upstream["name"] or upstream["url"],
-                        model=(masked or {}).get("model", ""),
-                        status=response.status_code,
-                        ms=int(1000 * (time.monotonic() - started)),
-                        masked=vault.size,
-                        key_name=(client_key or {}).get("name", ""),
-                        req_raw=body,
-                        req_masked=masked,
-                        resp_raw={"note": "streamed response, not stored"},
-                        placeholders=[{"token": t, "value": v}
-                                      for t, v in vault.to_real.items()],
-                    )
+                capture_ctx = (
+                    {
+                        "route": route["prefix"],
+                        "provider": upstream["name"] or upstream["url"],
+                        "model": (masked or {}).get("model", ""),
+                        "status": response.status_code,
+                        "started": started,
+                        "masked": vault.size,
+                        "key_name": (client_key or {}).get("name", ""),
+                        "req_raw": body,
+                        "req_masked": masked,
+                    }
+                    if db.capture_enabled()
+                    else None
+                )
                 return StreamingResponse(
-                    _stream(client, ctx, response, vault, upstream),
+                    _stream(client, ctx, response, vault, upstream, capture_ctx),
                     media_type="text/event-stream",
                     headers={
                         "Cache-Control": "no-cache",
@@ -384,9 +381,34 @@ async def proxy(full_path: str, request: Request):
     )
 
 
-async def _stream(client, ctx, response, vault: Vault, upstream: dict):
-    """Re-emit SSE, restoring placeholders across chunk boundaries."""
+MAX_STREAM_CAPTURE = 20000
+
+
+async def _stream(client, ctx, response, vault: Vault, upstream: dict,
+                  capture_ctx=None):
+    """Re-emit SSE, restoring placeholders across chunk boundaries.
+
+    When recording is on, the deltas are also accumulated so the finished
+    answer can be stored once the stream ends. Accumulation is capped: a long
+    conversation should not be held in memory for the sake of a debug log, and
+    a truncated capture is better than a request that dies from it.
+    """
     restorer = StreamRestorer(vault)
+    raw_parts, out_parts = [], []
+    raw_len = out_len = 0
+    truncated = False
+
+    def collect(raw_piece: str, out_piece: str):
+        nonlocal raw_len, out_len, truncated
+        if raw_len < MAX_STREAM_CAPTURE:
+            raw_parts.append(raw_piece)
+            raw_len += len(raw_piece)
+        else:
+            truncated = True
+        if out_len < MAX_STREAM_CAPTURE:
+            out_parts.append(out_piece)
+            out_len += len(out_piece)
+
     try:
         async for line in response.aiter_lines():
             if not line:
@@ -399,6 +421,8 @@ async def _stream(client, ctx, response, vault: Vault, upstream: dict):
             if payload.strip() == "[DONE]":
                 tail = restorer.flush()
                 if tail:
+                    if capture_ctx:
+                        collect("", tail)
                     yield "data: " + json.dumps(
                         {"choices": [{"delta": {"content": tail}, "index": 0}]}
                     ) + "\n\n"
@@ -411,11 +435,16 @@ async def _stream(client, ctx, response, vault: Vault, upstream: dict):
                 continue
             for choice in chunk.get("choices", []):
                 delta = choice.get("delta") or {}
-                if isinstance(delta.get("content"), str):
-                    delta["content"] = restorer.feed(delta["content"])
+                before = delta.get("content")
+                if isinstance(before, str):
+                    delta["content"] = restorer.feed(before)
+                    if capture_ctx:
+                        collect(before, delta["content"])
                 for call in delta.get("tool_calls") or []:
                     fn = call.get("function", {})
                     if isinstance(fn.get("arguments"), str):
+                        if capture_ctx:
+                            collect(fn["arguments"], "")
                         fn["arguments"] = vault.restore(fn["arguments"])
             yield f"data: {json.dumps(chunk)}\n\n"
     except Exception as exc:  # noqa: BLE001
@@ -425,3 +454,27 @@ async def _stream(client, ctx, response, vault: Vault, upstream: dict):
     finally:
         await ctx.__aexit__(None, None, None)
         await client.aclose()
+        if capture_ctx:
+            # Runs even if the client disconnects mid-stream, so a cancelled
+            # request still leaves a record of how far it got.
+            assembled = "".join(raw_parts)
+            restored = "".join(out_parts) + restorer.buffer
+            note = " [truncated]" if truncated else ""
+            try:
+                db.record_capture(
+                    route=capture_ctx["route"],
+                    provider=capture_ctx["provider"],
+                    model=capture_ctx["model"],
+                    status=capture_ctx["status"],
+                    ms=int(1000 * (time.monotonic() - capture_ctx["started"])),
+                    masked=capture_ctx["masked"],
+                    key_name=capture_ctx["key_name"],
+                    req_raw=capture_ctx["req_raw"],
+                    req_masked=capture_ctx["req_masked"],
+                    resp_raw={"streamed": True, "content": assembled + note},
+                    resp_restored={"streamed": True, "content": restored + note},
+                    placeholders=[{"token": t, "value": v}
+                                  for t, v in vault.to_real.items()],
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("stream capture failed: %s", exc)
