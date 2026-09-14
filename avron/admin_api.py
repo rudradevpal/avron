@@ -370,7 +370,7 @@ RESERVED = ("/api", "/admin", "/static", "/health", "/analyze", "/anonymize",
 def _check_prefix(prefix: str) -> str:
     prefix = "/" + prefix.strip().strip("/")
     if not re.fullmatch(r"(/[a-zA-Z0-9._-]+)+", prefix):
-        raise HTTPException(400, "Prefix must look like /v1 or /secure/v1")
+        raise HTTPException(400, "Path must look like /v1 or /secure/v1")
     for r in RESERVED:
         if prefix == r or prefix.startswith(r + "/"):
             raise HTTPException(400, f"{prefix} collides with a reserved path.")
@@ -408,7 +408,7 @@ def list_routes(user: dict = Depends(me)):
 def route_health(rid: int, user: dict = Depends(me)):
     row = db.db().execute("SELECT * FROM routes WHERE id=?", (rid,)).fetchone()
     if not row:
-        raise HTTPException(404, "Route not found.")
+        raise HTTPException(404, "Endpoint not found.")
     return {
         "strategy": row["strategy"],
         "upstreams": pool.report(config.upstreams(rid)),
@@ -460,7 +460,7 @@ def add_route(body: RouteIn, user: dict = Depends(me)):
     if body.strategy not in STRATEGIES:
         raise HTTPException(400, "Unknown strategy.")
     if not body.upstreams:
-        raise HTTPException(400, "A route needs at least one upstream.")
+        raise HTTPException(400, "An endpoint needs at least one provider.")
     try:
         cur = db.db().execute(
             "INSERT INTO routes(prefix,label,enabled,upstream_url,upstream_token,"
@@ -472,7 +472,7 @@ def add_route(body: RouteIn, user: dict = Depends(me)):
              body.timeout, body.strategy, max(0, body.retries)),
         )
     except Exception:  # noqa: BLE001
-        raise HTTPException(400, "A route with that prefix already exists.")
+        raise HTTPException(400, "An endpoint with that path already exists.")
     _save_upstreams(cur.lastrowid, body.upstreams)
     db.db().commit()
     db.audit(user["username"], "route_create", prefix)
@@ -485,9 +485,9 @@ def edit_route(rid: int, body: RouteIn, user: dict = Depends(me)):
     if body.strategy not in STRATEGIES:
         raise HTTPException(400, "Unknown strategy.")
     if not db.db().execute("SELECT 1 FROM routes WHERE id=?", (rid,)).fetchone():
-        raise HTTPException(404, "Route not found.")
+        raise HTTPException(404, "Endpoint not found.")
     if not body.upstreams:
-        raise HTTPException(400, "A route needs at least one upstream.")
+        raise HTTPException(400, "An endpoint needs at least one provider.")
     db.db().execute(
         "UPDATE routes SET prefix=?,label=?,enabled=?,mask_roles=?,entities=?,"
         "use_llm=?,timeout=?,strategy=?,retries=? WHERE id=?",
@@ -615,7 +615,7 @@ async def route_models(rid: int, user: dict = Depends(me)):
 
     upstreams = config.upstreams(rid)
     if not upstreams:
-        raise HTTPException(404, "No upstreams on that route.")
+        raise HTTPException(404, "No providers on that endpoint.")
     seen, out, errors = set(), [], []
     for u in upstreams:
         if not u["enabled"]:
@@ -684,7 +684,7 @@ async def playground(body: PlaygroundRun, user: dict = Depends(me)):
             route = dict(r)
             break
     if route is None:
-        raise HTTPException(404, "Route not found.")
+        raise HTTPException(404, "Endpoint not found.")
     route["upstreams"] = [
         {**u, "token": db.decrypt(u["token"])} for u in route["upstreams"]
     ]
@@ -702,7 +702,7 @@ async def playground(body: PlaygroundRun, user: dict = Depends(me)):
 
     candidates = pool.order(route["upstreams"], route["strategy"])
     if not candidates:
-        raise HTTPException(503, "No upstream enabled on this route.")
+        raise HTTPException(503, "No provider enabled on this endpoint.")
 
     payload = {
         "model": body.model,

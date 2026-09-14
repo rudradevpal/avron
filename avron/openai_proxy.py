@@ -1,8 +1,9 @@
 """Transparent OpenAI-compatible forward proxy, driven by DB routes.
 
-Every route configured in the UI gets its own path prefix, upstream, token,
-entity set, mask roles and LLM toggle. Requests are forwarded verbatim; only
-bodies whose shape we recognise are rewritten, and only for the configured roles.
+Every endpoint configured in the console gets its own path prefix, provider
+pool, entity set, masked roles and detection-model toggle. Requests are
+forwarded verbatim; only bodies whose shape we recognise are rewritten, and only
+for the configured roles.
 """
 
 import json
@@ -159,13 +160,13 @@ def _prepare(upstream: dict, rest: str, headers: dict, body):
 async def proxy(full_path: str, request: Request):
     route = config.match_route("/" + full_path)
     if route is None:
-        return JSONResponse(status_code=404, content={"error": "No route configured"})
+        return JSONResponse(status_code=404, content={"error": "No endpoint configured for this path"})
 
     candidates = pool.order(route["upstreams"], route["strategy"])
     if not candidates:
         return JSONResponse(
             status_code=503,
-            content={"error": f"No upstream enabled on {route['prefix']}"},
+            content={"error": f"No provider enabled on {route['prefix']}"},
         )
 
     rest = route["_rest"]

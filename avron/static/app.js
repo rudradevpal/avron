@@ -154,7 +154,7 @@ async function viewOverview(el) {
       <div class="metric"><b>${t.requests}</b><span>Requests proxied</span></div>
       <div class="metric info"><b>${t.masked}</b><span>Values masked</span></div>
       <div class="metric ${t.errors ? "bad" : ""}"><b>${t.errors}</b><span>Upstream errors</span></div>
-      <div class="metric"><b>${stats.routes}</b><span>Routes configured</span></div>
+      <div class="metric"><b>${stats.routes}</b><span>Endpoints configured</span></div>
     </div>
     <div class="grid two" style="margin-bottom:18px">
       <div class="panel" style="margin:0">
@@ -185,7 +185,7 @@ async function viewOverview(el) {
           { label: "Errors", num: true, cell: (r) => (r.errors ? `<span style="color:var(--bad)">${r.errors}</span>` : "0") },
         ],
         stats.recent,
-        "No traffic yet. Point a client at a proxy route to see it here."
+        "No traffic yet. Point a client at an endpoint to see it here."
       )}
     </div>`;
 }
@@ -471,7 +471,7 @@ async function viewPlayground(el) {
     return;
   }
   el.innerHTML =
-    head("Playground", "Send a prompt through a route and see exactly what the model receives. This is the chat model, not the detection model.") +
+    head("Playground", "Send a prompt through an endpoint and see exactly what the model receives. This is the chat model, not the detection model.") +
     `<div class="panel"><div class="panel-body">
       <div class="grid two">
         <label class="field"><span>Endpoint</span>
