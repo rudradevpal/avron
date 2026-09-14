@@ -236,6 +236,24 @@ async def proxy(full_path: str, request: Request):
                     raise RuntimeError(f"{response.status_code} {detail}")
                 pool.record_success(upstream["id"], time.monotonic() - started)
                 db.bump_stats(route["prefix"], masked=vault.size)
+                if db.capture_enabled():
+                    # The body is relayed as it arrives and never assembled, so
+                    # only the request side can be stored. Without this a
+                    # streaming client would leave the Requests tab empty.
+                    db.record_capture(
+                        route=route["prefix"],
+                        provider=upstream["name"] or upstream["url"],
+                        model=(masked or {}).get("model", ""),
+                        status=response.status_code,
+                        ms=int(1000 * (time.monotonic() - started)),
+                        masked=vault.size,
+                        key_name=(client_key or {}).get("name", ""),
+                        req_raw=body,
+                        req_masked=masked,
+                        resp_raw={"note": "streamed response, not stored"},
+                        placeholders=[{"token": t, "value": v}
+                                      for t, v in vault.to_real.items()],
+                    )
                 return StreamingResponse(
                     _stream(client, ctx, response, vault, upstream),
                     media_type="text/event-stream",
@@ -283,6 +301,22 @@ async def proxy(full_path: str, request: Request):
             )
 
             if "json" not in r.headers.get("content-type", ""):
+                if db.capture_enabled():
+                    db.record_capture(
+                        route=route["prefix"],
+                        provider=upstream["name"] or upstream["url"],
+                        model=(masked or {}).get("model", "")
+                        if isinstance(masked, dict) else "",
+                        status=r.status_code,
+                        ms=int(elapsed * 1000),
+                        masked=vault.size,
+                        key_name=(client_key or {}).get("name", ""),
+                        req_raw=body,
+                        req_masked=masked,
+                        resp_raw=r.text[:2000],
+                        placeholders=[{"token": t, "value": v}
+                                      for t, v in vault.to_real.items()],
+                    )
                 return Response(
                     content=r.content,
                     status_code=r.status_code,
