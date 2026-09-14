@@ -1078,9 +1078,69 @@ def stats(user: dict = Depends(admin)):
     }
 
 
+# ------------------------------------------------- request inspection
+@router.get("/captures")
+def list_captures(user: dict = Depends(admin)):
+    db.prune_captures()
+    rows = db.db().execute(
+        "SELECT id, ts, route, provider, model, status, ms, masked, tokens_in, "
+        "tokens_out, key_name FROM captures ORDER BY id DESC LIMIT 200"
+    ).fetchall()
+    return {
+        "enabled": db.capture_enabled(),
+        "days": db.get_setting("capture_days", "1"),
+        "limit": db.get_setting("capture_limit", "200"),
+        "audit_days": db.get_setting("audit_days", "90"),
+        "audit_limit": db.get_setting("audit_limit", "5000"),
+        "captures": [dict(r) for r in rows],
+    }
+
+
+@router.get("/captures/{cid}")
+def read_capture(cid: int, user: dict = Depends(admin)):
+    """Decrypt one captured request. This returns unmasked personal data."""
+    row = db.db().execute("SELECT * FROM captures WHERE id=?", (cid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "That request is no longer stored.")
+
+    def dec(field):
+        raw = db.decrypt(row[field]) if row[field] else ""
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return raw
+
+    db.audit(user["username"], "capture_view", f"request {cid}")
+    return {
+        **{k: row[k] for k in ("id", "ts", "route", "provider", "model",
+                               "status", "ms", "masked", "tokens_in",
+                               "tokens_out", "key_name")},
+        "req_raw": dec("req_raw"),
+        "req_masked": dec("req_masked"),
+        "resp_raw": dec("resp_raw"),
+        "resp_restored": dec("resp_restored"),
+        "placeholders": dec("placeholders") or [],
+    }
+
+
+@router.delete("/captures")
+def purge_captures(user: dict = Depends(admin)):
+    n = db.purge_captures()
+    db.audit(user["username"], "capture_purge", f"{n} requests")
+    return {"ok": True, "deleted": n}
+
+
 @router.get("/audit")
 def audit_log(user: dict = Depends(admin)):
+    db.prune_audit()
     rows = db.db().execute(
-        "SELECT ts, actor, action, detail FROM audit ORDER BY id DESC LIMIT 200"
+        "SELECT ts, actor, action, detail FROM audit ORDER BY id DESC LIMIT 300"
     ).fetchall()
-    return [dict(r) for r in rows]
+    return {
+        "days": db.get_setting("audit_days", "90"),
+        "limit": db.get_setting("audit_limit", "5000"),
+        "total": db.db().execute("SELECT COUNT(*) c FROM audit").fetchone()["c"],
+        "entries": [dict(r) for r in rows],
+    }

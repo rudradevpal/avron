@@ -1209,19 +1209,226 @@ async function viewUsers(el) {
 
 /* ============================================================= activity */
 async function viewActivity(el) {
-  const rows = await api("/audit");
+  const tab = state.cache.auditTab || "requests";
   el.innerHTML =
-    head("Audit log", "Every configuration change, and who made it. Message content is never recorded.") +
+    head("Audit log", "Recent requests and every configuration change.") +
+    `<div class="actions" style="margin-bottom:16px">
+      <button class="btn ${tab === "requests" ? "" : "ghost"}" data-tab="requests">Requests</button>
+      <button class="btn ${tab === "changes" ? "" : "ghost"}" data-tab="changes">Configuration changes</button>
+     </div><div id="audit-body"></div>`;
+
+  $$("[data-tab]", el).forEach((b) =>
+    b.addEventListener("click", () => {
+      state.cache.auditTab = b.dataset.tab;
+      go("activity");
+    })
+  );
+
+  const body = $("#audit-body", el);
+  if (tab === "changes") return renderChanges(body);
+  return renderRequests(body);
+}
+
+async function renderChanges(el) {
+  const d = await api("/audit");
+  const rows = d.entries;
+  el.innerHTML =
+    `<div class="panel"><div class="panel-body">
+      <div class="grid two" style="max-width:560px">
+        <label class="field" style="margin:0"><span>Keep changes for</span>
+          <div class="input-row">
+            <input type="number" id="audit-days" min="1" max="3650" value="${esc(d.days)}">
+            <span class="field-note" style="margin:0;align-self:center">days</span>
+          </div></label>
+        <label class="field" style="margin:0"><span>Never keep more than</span>
+          <div class="input-row">
+            <input type="number" id="audit-limit" min="100" max="200000" step="100" value="${esc(d.limit)}">
+            <span class="field-note" style="margin:0;align-self:center">entries</span>
+          </div></label>
+      </div>
+      <div class="actions" style="margin-top:14px">
+        <button class="btn" id="audit-save">Save</button>
+        <span class="field-note" style="margin:0">${d.total} stored now</span>
+      </div>
+    </div></div>` +
     `<div class="panel">${table(
-      [
-        { label: "When", cell: (r) => `<span class="field-note" style="margin:0">${esc(r.ts.replace("T", " ").replace("+00:00", ""))}</span>` },
-        { label: "Who", cell: (r) => esc(r.actor) },
-        { label: "What", cell: (r) => `<span class="tag">${esc(r.action)}</span>` },
-        { label: "Detail", cell: (r) => `<span class="field-note" style="margin:0">${esc(r.detail).slice(0, 110)}</span>` },
-      ],
-      rows,
-      "Nothing recorded yet."
-    )}</div>`;
+    [
+      { label: "When", cell: (r) => `<span class="field-note" style="margin:0">${esc(r.ts.replace("T", " ").replace("+00:00", ""))}</span>` },
+      { label: "Who", cell: (r) => esc(r.actor) },
+      { label: "What", cell: (r) => `<span class="tag">${esc(r.action)}</span>` },
+      { label: "Detail", cell: (r) => `<span class="field-note" style="margin:0">${esc(r.detail).slice(0, 110)}</span>` },
+    ],
+    rows,
+    "Nothing recorded yet."
+  )}</div>`;
+
+  $("#audit-save").addEventListener("click", async (e) => {
+    await busy(e.currentTarget, () =>
+      api("/settings", {
+        method: "PUT",
+        body: {
+          audit_days: $("#audit-days").value,
+          audit_limit: $("#audit-limit").value,
+        },
+      })
+    );
+    toast("Saved");
+    go("activity");
+  });
+}
+
+async function renderRequests(el) {
+  const d = await api("/captures");
+  el.innerHTML =
+    (d.enabled
+      ? `<div class="notice warn">Recording is <strong>on</strong>. The text of each request is stored, unmasked, for ${esc(d.days)} day${d.days === "1" ? "" : "s"} — the real names and numbers, not the placeholders. Turn it off when you have finished debugging.</div>`
+      : `<div class="notice">Recording is off, so only totals are kept. Switch it on to see what a request actually looked like going out and coming back.</div>`) +
+    `<div class="panel"><div class="panel-body">
+      <label class="toggle" style="margin-bottom:16px"><input type="checkbox" id="cap-on" ${d.enabled ? "checked" : ""}><span class="switch"></span>
+        <span>Record requests</span></label>
+      <div class="grid two" style="max-width:560px">
+        <label class="field" style="margin:0"><span>Keep requests for</span>
+          <div class="input-row">
+            <input type="number" id="cap-days" min="1" max="365" value="${esc(d.days)}">
+            <span class="field-note" style="margin:0;align-self:center">days</span>
+          </div>
+          <div class="field-note">These hold real names and numbers. Keep it short.</div></label>
+        <label class="field" style="margin:0"><span>Never keep more than</span>
+          <div class="input-row">
+            <input type="number" id="cap-limit" min="10" max="20000" step="10" value="${esc(d.limit)}">
+            <span class="field-note" style="margin:0;align-self:center">requests</span>
+          </div>
+          <div class="field-note">A ceiling so a busy day cannot fill the disk.</div></label>
+      </div>
+      <div class="actions" style="margin-top:14px">
+        <button class="btn" id="cap-save">Save</button>
+        <button class="btn ghost" id="cap-purge">Delete everything recorded</button>
+      </div>
+    </div></div>
+    <div class="panel">
+      <div class="panel-head"><h3>Recent requests</h3><span class="hint">click a row to see it</span></div>
+      ${table(
+        [
+          { label: "When", cell: (c) => `<span class="field-note" style="margin:0">${esc(c.ts.slice(11, 19))}</span>` },
+          { label: "Endpoint", cell: (c) => `<code>${esc(c.route)}</code>` },
+          { label: "Provider", cell: (c) => esc(c.provider) },
+          { label: "Model", cell: (c) => `<code>${esc(c.model || "—")}</code>` },
+          { label: "Status", cell: (c) => (c.status === 0 ? pill("bad", "failed") : c.status >= 400 ? pill("bad", c.status) : pill("ok", c.status)) },
+          { label: "Masked", num: true, cell: (c) => c.masked },
+          { label: "Tokens", num: true, cell: (c) => (c.tokens_in + c.tokens_out) || "—" },
+          { label: "Time", num: true, cell: (c) => `${c.ms} ms` },
+          { label: "", cell: (c) => `<button class="btn ghost small" data-cap="${c.id}">Open</button>` },
+        ],
+        d.captures,
+        d.enabled ? "Nothing recorded yet. Send a request through an endpoint." : "Recording is off."
+      )}
+    </div>`;
+
+  $("#cap-on").addEventListener("change", async (e) => {
+    try {
+      await api("/settings", { method: "PUT", body: { capture_enabled: e.target.checked } });
+      toast(e.target.checked ? "Recording on" : "Recording off");
+      go("activity");
+    } catch (err) { e.target.checked = !e.target.checked; toast(err.message, true); }
+  });
+  $("#cap-save").addEventListener("click", async (e) => {
+    await busy(e.currentTarget, () =>
+      api("/settings", {
+        method: "PUT",
+        body: { capture_days: $("#cap-days").value, capture_limit: $("#cap-limit").value },
+      })
+    );
+    toast("Saved");
+    go("activity");
+  });
+  $("#cap-purge").addEventListener("click", async (e) => {
+    if (!confirm("Delete every recorded request?")) return;
+    const r = await busy(e.currentTarget, () => api("/captures", { method: "DELETE" }));
+    toast(`Deleted ${r.deleted}`);
+    go("activity");
+  });
+  $$("[data-cap]", el).forEach((b) =>
+    b.addEventListener("click", () => openCapture(b.dataset.cap))
+  );
+}
+
+function textOf(payload) {
+  /* Pull the readable part out of a chat body so the panels are not a wall
+     of JSON. Falls back to the whole object when the shape is unfamiliar. */
+  if (!payload) return "";
+  if (typeof payload === "string") return payload;
+  if (Array.isArray(payload.messages)) {
+    return payload.messages
+      .map((m) => {
+        const c = typeof m.content === "string"
+          ? m.content
+          : Array.isArray(m.content)
+          ? m.content.filter((x) => x.type === "text").map((x) => x.text).join("\n")
+          : JSON.stringify(m.content);
+        return `${m.role}: ${c}`;
+      })
+      .join("\n\n");
+  }
+  const choice = payload.choices?.[0]?.message;
+  if (choice) return choice.content ?? JSON.stringify(choice, null, 2);
+  if (payload.error) return typeof payload.error === "string" ? payload.error : JSON.stringify(payload.error, null, 2);
+  return JSON.stringify(payload, null, 2);
+}
+
+async function openCapture(id) {
+  let c;
+  try { c = await api("/captures/" + id); }
+  catch (e) { return toast(e.message, true); }
+
+  const hl = (t) => esc(t).replace(/&lt;[A-Z][A-Z0-9_]*_\d+&gt;/g, (m) => `<mark class="ph">${m}</mark>`);
+  const wrap = document.createElement("div");
+  wrap.className = "backdrop";
+  wrap.innerHTML = `<div class="modal" style="max-width:920px" role="dialog" aria-modal="true">
+    <div class="modal-head">Request at ${esc(c.ts.replace("T", " ").replace("+00:00", ""))}</div>
+    <div class="modal-body">
+      <div class="grid four" style="margin-bottom:16px">
+        <div class="metric info"><b>${c.masked}</b><span>Values masked</span></div>
+        <div class="metric"><b>${c.ms}</b><span>Milliseconds</span></div>
+        <div class="metric"><b>${(c.tokens_in + c.tokens_out) || "—"}</b><span>Tokens</span></div>
+        <div class="metric"><b style="font-size:14px">${esc(c.provider)}</b><span>Provider</span></div>
+      </div>
+      <div class="field-note" style="margin-bottom:14px">
+        <code>${esc(c.route)}</code> · model <code>${esc(c.model || "—")}</code> ·
+        ${c.tokens_in} in / ${c.tokens_out} out${c.key_name ? ` · key ${esc(c.key_name)}` : ""}
+      </div>
+      <div class="pg">
+        <div>
+          <div class="stage mono"><header>What you sent<span>unmasked</span></header>
+            <div>${esc(textOf(c.req_raw))}</div></div>
+          <div class="stage mono"><header>What the model got<span>masked</span></header>
+            <div>${hl(textOf(c.req_masked))}</div></div>
+        </div>
+        <div>
+          <div class="stage mono"><header>What the model replied<span>masked</span></header>
+            <div>${hl(textOf(c.resp_raw))}</div></div>
+          <div class="stage mono"><header>What your app got back<span>restored</span></header>
+            <div>${esc(textOf(c.resp_restored))}</div></div>
+        </div>
+      </div>
+      <div class="stage"><header>Placeholders</header>
+        ${table(
+          [
+            { label: "Token", cell: (x) => `<mark class="ph">${esc(x.token)}</mark>` },
+            { label: "Real value", cell: (x) => `<code>${esc(x.value)}</code>` },
+          ],
+          c.placeholders || [],
+          "Nothing was detected in this request."
+        )}</div>
+    </div>
+    <div class="modal-foot"><button class="btn" id="cap-close">Close</button></div>
+  </div>`;
+  modalRoot.replaceChildren(wrap);
+  const close = () => modalRoot.replaceChildren();
+  $("#cap-close", wrap).addEventListener("click", close);
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) close(); });
+  document.addEventListener("keydown", function onKey(e) {
+    if (e.key === "Escape") { close(); document.removeEventListener("keydown", onKey); }
+  });
 }
 
 /* ============================================================== account */

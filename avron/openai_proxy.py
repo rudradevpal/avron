@@ -290,9 +290,30 @@ async def proxy(full_path: str, request: Request):
                     headers={"X-Upstream": upstream["name"] or str(upstream["id"])},
                 )
 
-            data = vault.restore_deep(r.json())
+            payload_json = r.json()
+            data = vault.restore_deep(payload_json)
             if isinstance(data, dict) and vault.size:
                 data["x_pii_masked"] = vault.size
+
+            if db.capture_enabled():
+                db.record_capture(
+                    route=route["prefix"],
+                    provider=upstream["name"] or upstream["url"],
+                    model=(masked or {}).get("model", ""),
+                    status=r.status_code,
+                    ms=int(elapsed * 1000),
+                    masked=vault.size,
+                    tokens_in=usage.get("prompt_tokens", 0) or 0,
+                    tokens_out=usage.get("completion_tokens", 0) or 0,
+                    key_name=(client_key or {}).get("name", ""),
+                    req_raw=body,
+                    req_masked=masked,
+                    resp_raw=payload_json,
+                    resp_restored=data,
+                    placeholders=[{"token": t, "value": v}
+                                  for t, v in vault.to_real.items()],
+                )
+
             return JSONResponse(
                 status_code=r.status_code,
                 content=data,
@@ -305,6 +326,19 @@ async def proxy(full_path: str, request: Request):
                 upstream["id"], route["prefix"],
                 int(1000 * (time.monotonic() - started)), False,
             )
+            if db.capture_enabled():
+                db.record_capture(
+                    route=route["prefix"],
+                    provider=upstream["name"] or upstream["url"],
+                    model=(masked or {}).get("model", "") if masked else "",
+                    status=0,
+                    ms=int(1000 * (time.monotonic() - started)),
+                    masked=vault.size,
+                    key_name=(client_key or {}).get("name", ""),
+                    req_raw=body,
+                    req_masked=masked,
+                    resp_raw={"error": str(exc)},
+                )
             errors.append(f"{upstream['name'] or upstream['url']}: {exc}")
         finally:
             pool.leave(upstream["id"])

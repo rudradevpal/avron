@@ -12,7 +12,8 @@ import os
 import secrets
 import sqlite3
 import threading
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -145,6 +146,26 @@ CREATE TABLE IF NOT EXISTS audit (
     action TEXT NOT NULL,
     detail TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS captures (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT NOT NULL,
+    route        TEXT NOT NULL DEFAULT '',
+    provider     TEXT NOT NULL DEFAULT '',
+    model        TEXT NOT NULL DEFAULT '',
+    status       INTEGER NOT NULL DEFAULT 0,
+    ms           INTEGER NOT NULL DEFAULT 0,
+    masked       INTEGER NOT NULL DEFAULT 0,
+    tokens_in    INTEGER NOT NULL DEFAULT 0,
+    tokens_out   INTEGER NOT NULL DEFAULT 0,
+    key_name     TEXT NOT NULL DEFAULT '',
+    -- All four blobs are Fernet-encrypted under MASTER_KEY. The request and
+    -- restored response contain unmasked personal data by definition.
+    req_raw      TEXT NOT NULL DEFAULT '',
+    req_masked   TEXT NOT NULL DEFAULT '',
+    resp_raw     TEXT NOT NULL DEFAULT '',
+    resp_restored TEXT NOT NULL DEFAULT '',
+    placeholders TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS stats (
     day       TEXT NOT NULL,
     hour      INTEGER NOT NULL,
@@ -175,6 +196,15 @@ DEFAULT_SETTINGS = {
     # When on, proxy and masking requests need an AVRON key. Off by default so
     # an upgrade does not break clients that are already pointed at it.
     "require_client_key": "false",
+    # Request inspection. Off by default: it stores unmasked text at rest,
+    # which is the one thing this product exists to avoid.
+    "capture_enabled": "false",
+    "capture_limit": "200",
+    # Days, not minutes. Kept short by default because these rows hold
+    # unmasked text; raise it deliberately, not by habit.
+    "capture_days": "1",
+    "audit_days": "90",
+    "audit_limit": "5000",
 }
 
 
@@ -238,10 +268,7 @@ def audit(actor: str, action: str, detail: Any = "") -> None:
             "INSERT INTO audit(ts,actor,action,detail) VALUES(?,?,?,?)",
             (now(), actor, action, detail),
         )
-        db().execute(
-            "DELETE FROM audit WHERE id NOT IN "
-            "(SELECT id FROM audit ORDER BY id DESC LIMIT 2000)"
-        )
+        prune_audit()
         db().commit()
 
 
@@ -281,6 +308,91 @@ def record_sample(upstream_id: int, route: str, ms: int, ok: bool,
         db().commit()
 
 
+MAX_CAPTURE_CHARS = 20000
+
+
+def capture_enabled() -> bool:
+    return get_setting("capture_enabled", "false") == "true"
+
+
+def record_capture(**kw) -> None:
+    """Store one request for inspection. Encrypted, capped and short-lived.
+
+    Called only when capture is switched on. Anything that goes wrong here is
+    swallowed: debugging convenience must never break a proxied request.
+    """
+    if not capture_enabled():
+        return
+    try:
+        def enc(value) -> str:
+            if not value:
+                return ""
+            text = value if isinstance(value, str) else json.dumps(value, default=str)
+            return encrypt(text[:MAX_CAPTURE_CHARS])
+
+        with _lock:
+            db().execute(
+                "INSERT INTO captures(ts,route,provider,model,status,ms,masked,"
+                "tokens_in,tokens_out,key_name,req_raw,req_masked,resp_raw,"
+                "resp_restored,placeholders) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (now(), kw.get("route", ""), kw.get("provider", ""),
+                 kw.get("model", ""), kw.get("status", 0), kw.get("ms", 0),
+                 kw.get("masked", 0), kw.get("tokens_in", 0),
+                 kw.get("tokens_out", 0), kw.get("key_name", ""),
+                 enc(kw.get("req_raw")), enc(kw.get("req_masked")),
+                 enc(kw.get("resp_raw")), enc(kw.get("resp_restored")),
+                 enc(kw.get("placeholders"))),
+            )
+            prune_captures()
+            db().commit()
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("avron").warning("capture failed: %s", exc)
+
+
+def _int_setting(key: str, default: int, low: int, high: int) -> int:
+    try:
+        return max(low, min(high, int(float(get_setting(key, str(default))))))
+    except (TypeError, ValueError):
+        return default
+
+
+def prune_captures() -> None:
+    """Two limits, whichever bites first: age in days and a row ceiling.
+
+    The row ceiling is not a preference, it is a safety net. Without it a busy
+    gateway left recording could fill the disk before the day is out.
+    """
+    days = _int_setting("capture_days", 1, 1, 365)
+    limit = _int_setting("capture_limit", 200, 10, 20000)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    db().execute("DELETE FROM captures WHERE ts < ?", (cutoff,))
+    db().execute(
+        "DELETE FROM captures WHERE id <= (SELECT MAX(id) - ? FROM captures)",
+        (limit,),
+    )
+
+
+def prune_audit() -> None:
+    days = _int_setting("audit_days", 90, 1, 3650)
+    limit = _int_setting("audit_limit", 5000, 100, 200000)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    db().execute("DELETE FROM audit WHERE ts < ?", (cutoff,))
+    db().execute(
+        "DELETE FROM audit WHERE id NOT IN "
+        "(SELECT id FROM audit ORDER BY id DESC LIMIT ?)",
+        (limit,),
+    )
+
+
+def purge_captures() -> int:
+    with _lock:
+        n = db().execute("SELECT COUNT(*) c FROM captures").fetchone()["c"]
+        db().execute("DELETE FROM captures")
+        db().commit()
+    return n
+
+
 def _migrate() -> None:
     """Add columns and fold single-upstream routes into the pool table."""
     cols = {r["name"] for r in db().execute("PRAGMA table_info(routes)")}
@@ -304,6 +416,17 @@ def _migrate() -> None:
             "ALTER TABLE upstreams ADD COLUMN provider_type TEXT NOT NULL "
             "DEFAULT 'openai'"
         )
+
+    old_minutes = db().execute(
+        "SELECT value FROM settings WHERE key='capture_minutes'"
+    ).fetchone()
+    if old_minutes:
+        days = max(1, round(int(old_minutes["value"] or 60) / 1440))
+        db().execute(
+            "INSERT INTO settings(key,value) VALUES('capture_days',?) "
+            "ON CONFLICT(key) DO NOTHING", (str(days),)
+        )
+        db().execute("DELETE FROM settings WHERE key='capture_minutes'")
 
     pcols = {r["name"] for r in db().execute("PRAGMA table_info(patterns)")}
     if "pack" not in pcols:
