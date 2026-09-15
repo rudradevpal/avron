@@ -10,7 +10,9 @@ they are ignored.
 |---|---|---|
 | `MASTER_KEY` | yes | Fernet key encrypting stored API keys |
 | `DB_PATH` | no | defaults to `/data/gateway.db` |
-| `COOKIE_SECURE` | no | set `true` when serving over HTTPS |
+| `COOKIE_SECURE` | no | set `true` once HTTPS is on |
+| `TLS_DIR` | no | defaults to `/data/tls` |
+| `TLS_PORT` | no | defaults to 8443 |
 | `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `LLM_MODEL`, `USE_LLM`, `SCORE_THRESHOLD` | no | first-boot seeds only |
 
 ## Endpoints
@@ -147,6 +149,14 @@ Set in the console under Audit log.
 | `audit_limit` | 5,000 | Hard ceiling on configuration changes |
 
 Age and count both apply; whichever trims first wins.
+
+## HTTPS
+
+Certificates are managed in the console, not the environment: Let's Encrypt with
+automatic renewal, an uploaded PEM pair, or a self-signed certificate. Switching
+HTTPS on restarts Avron so uvicorn can bind the TLS socket.
+
+Set `COOKIE_SECURE: "true"` afterwards. See [tls.md](tls.md).
 
 ## Users
 

@@ -127,6 +127,24 @@ write `{19}` for a century, not `19`.
   everyone a distinct value, the remainder fall back to name tags rather than
   two records quietly sharing one.
 
+### Naming a custom entity
+
+The name becomes the tag, so it has to be unusual enough not to appear in
+ordinary text. An entity called `ORDER` produces `ORDER_1`, and a model writing
+"please check order 1" would otherwise have that sentence rewritten with a real
+value in it — a leak into text that never contained one.
+
+Avron handles this in two ways, and you should do the third:
+
+- **Loose matching is earned, not given.** Space, hyphen and run-together forms
+  (`IN PAN 1`, `in-pan-1`, `INPAN1`) are only accepted for names that contain an
+  underscore or are eight characters or longer. Short single-word names must
+  carry an underscore before the number, so "order 1" is never matched.
+- **The editor warns you** when the name is an ordinary English word or is very
+  short, and suggests a prefix.
+- **Prefix your own names.** `ACME_ORDER`, not `ORDER`. It costs nothing and
+  removes the problem entirely.
+
 ### The honest limits
 
 - **Formats without a checksum carry residual risk.** PAN and IFSC have no check
@@ -139,6 +157,13 @@ write `{19}` for a century, not `19`.
 - **Errors are harder to spot.** A wrong tag is obvious; a wrong lookalike looks
   like data. The stand-in table in the Playground and the request inspector is
   where you check.
+- **A small shape collides.** A three-character shape has a few thousand
+  possibilities and will eventually produce a value that is also an ordinary
+  word. Lookalikes are matched as whole words only, which limits the damage,
+  and the editor warns when a shape has little room.
+- **Last 4 needs something to hide.** A value of four characters or fewer would
+  come out unchanged, so those fall back to a name tag rather than passing
+  through looking masked.
 
 ## Writing a pattern
 

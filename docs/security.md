@@ -50,7 +50,8 @@ one is set and nothing otherwise.
   keys and password. Anyone with an administrator account can read the egress
   configuration and change what gets masked.
 - **Serve it over HTTPS** and set `COOKIE_SECURE=true`. None of the above helps
-  if the session cookie crosses the network in the clear.
+  if the session cookie crosses the network in the clear. Avron can get a
+  Let's Encrypt certificate and renew it itself — see [tls.md](tls.md).
 
 ## Client authentication
 

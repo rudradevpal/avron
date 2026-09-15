@@ -89,7 +89,7 @@ function renderLogin(message) {
 const VIEWS = [
   ["Traffic", [["overview", "Overview"], ["routes", "Endpoints"], ["playground", "Playground"], ["analytics", "Analytics"]]],
   ["Detection", [["detection", "Entities"], ["patterns", "Patterns"], ["test", "Scan text"]]],
-  ["Setup", [["llm", "Detection model"], ["network", "Egress"], ["users", "Users"], ["activity", "Audit log"]]],
+  ["Setup", [["llm", "Detection model"], ["network", "Egress"], ["tls", "HTTPS"], ["users", "Users"], ["activity", "Audit log"]]],
   ["You", [["keys", "API keys"], ["account", "Your account"]]],
 ];
 
@@ -161,6 +161,7 @@ function go(view) {
     test: viewTest,
     llm: viewLlm,
     network: viewNetwork,
+    tls: viewTls,
     keys: viewKeys,
     users: viewUsers,
     activity: viewActivity,
@@ -516,10 +517,10 @@ async function viewPlayground(el) {
           <select id="pg-route">${routes.map((r) => `<option value="${r.id}">${esc(r.prefix)}${r.label ? " — " + esc(r.label) : ""}</option>`).join("")}</select></label>
         <label class="field"><span>Model</span>
           <div class="input-row">
-            <select id="pg-model"><option value="auto:fast">auto:fast</option></select>
+            <select id="pg-model"><option value="">loading…</option></select>
             <button class="btn ghost" id="pg-load" type="button">Load models</button>
           </div>
-          <div class="field-note" id="pg-model-note">Load the catalogue from this endpoint's providers.</div></label>
+          <div class="field-note" id="pg-model-note">Read from this endpoint's providers.</div></label>
       </div>
       <label class="field"><span>System prompt (optional, never masked)</span>
         <input type="text" id="pg-system" placeholder="You are a helpful assistant."></label>
@@ -547,16 +548,28 @@ The account is held jointly with Lakshmi Narayanan, UPI lakshmi@okhdfcbank, IFSC
     try {
       const r = await api(`/routes/${$("#pg-route").value}/models`);
       const sel = $("#pg-model");
-      // Group by vendor so a catalogue of several hundred stays navigable.
-      const byVendor = {};
-      r.models.forEach((m) => (byVendor[m.vendor || "other"] ??= []).push(m));
-      sel.innerHTML =
-        `<optgroup label="Automatic"><option value="auto:fast">auto:fast</option><option value="auto">auto</option><option value="auto:smart">auto:smart</option></optgroup>` +
-        Object.keys(byVendor).sort().map((v) =>
-          `<optgroup label="${esc(v)}">` +
-          byVendor[v].map((m) => `<option value="${esc(m.id)}">${esc(v)} / ${esc(m.short)}</option>`).join("") +
-          `</optgroup>`
-        ).join("");
+      const keep = sel.value;
+      // Group by the provider the model actually came from, and show the id
+      // exactly as that provider reports it. Nothing is invented here: an
+      // alias the provider does not publish would just 404 at request time.
+      const byProvider = {};
+      r.models.forEach((m) => (byProvider[m.upstream || "provider"] ??= []).push(m));
+      sel.innerHTML = Object.keys(byProvider)
+        .sort()
+        .map(
+          (prov) =>
+            `<optgroup label="${esc(prov)}">` +
+            byProvider[prov]
+              .map((m) => `<option value="${esc(m.id)}">${esc(prov)}/${esc(m.id)}</option>`)
+              .join("") +
+            `</optgroup>`
+        )
+        .join("");
+      if (!sel.options.length) {
+        sel.innerHTML = `<option value="">no models reported</option>`;
+      } else if (keep && [...sel.options].some((o) => o.value === keep)) {
+        sel.value = keep;
+      }
       note.textContent = r.errors.length
         ? `${r.models.length} models. ${r.errors.length} provider(s) failed.`
         : `${r.models.length} models across this endpoint's providers.`;
@@ -565,6 +578,7 @@ The account is held jointly with Lakshmi Narayanan, UPI lakshmi@okhdfcbank, IFSC
   };
   $("#pg-load").addEventListener("click", loadModels);
   $("#pg-route").addEventListener("change", loadModels);
+  loadModels();
 
   $("#pg-run").addEventListener("click", async () => {
     const out = $("#pg-out");
@@ -572,6 +586,12 @@ The account is held jointly with Lakshmi Narayanan, UPI lakshmi@okhdfcbank, IFSC
     btn.dataset.busy = "1";
     btn.disabled = true;
     out.innerHTML = `<div class="panel"><div class="skeleton"><i></i><i></i><i></i></div></div>`;
+    if (!$("#pg-model").value) {
+      btn.disabled = false;
+      delete btn.dataset.busy;
+      out.innerHTML = "";
+      return toast("Pick a model first", true);
+    }
     try {
       const r = await api("/playground", {
         method: "POST",
@@ -941,8 +961,9 @@ function patternModal(p) {
     body: `
       <div class="grid two">
         <label class="field"><span>Data type</span>
-          <input type="text" class="mono" name="entity" value="${esc(p?.entity || "")}" placeholder="IN_EMPLOYEE_ID">
-          <div class="field-note">Capitals, digits and underscores.</div></label>
+          <input type="text" class="mono" name="entity" value="${esc(p?.entity || "")}" placeholder="ACME_EMPLOYEE_ID">
+          <div class="field-note">Capitals, digits and underscores. Prefix it with something of your own — a name like <code>ORDER</code> can be confused with ordinary text.</div>
+          <div class="field-note" id="entity-warning" style="color:var(--warn)"></div></label>
         <label class="field"><span>Name</span>
           <input type="text" name="name" value="${esc(p?.name || "")}" placeholder="Employee ID"></label>
       </div>
@@ -971,10 +992,18 @@ function patternModal(p) {
       </div>`,
     onReady: (form) => {
       wireRedaction(form, p?.entity || "");
-      // Keep the surrogate preview honest when the entity name changes.
-      form.entity.addEventListener("input", () => {
-        form._entity = form.entity.value.trim().toUpperCase();
-      });
+      const checkName = debounce(async () => {
+        const name = form.entity.value.trim().toUpperCase();
+        form._entity = name;
+        const box = $("#entity-warning", form);
+        if (!name) return void (box.textContent = "");
+        try {
+          const r = await api("/entities/check", { method: "POST", body: { entity: name } });
+          box.textContent = r.warning || "";
+        } catch { box.textContent = ""; }
+      }, 300);
+      form.entity.addEventListener("input", checkName);
+      checkName();
       const run = debounce(async () => {
         const regex = form.regex.value;
         const preview = $("#rx-preview");
@@ -1017,9 +1046,10 @@ function patternModal(p) {
         redaction: form.redaction.value,
         shape: form.shape?.value || "",
       };
-      if (p) await api("/patterns/" + p.id, { method: "PUT", body });
-      else await api("/patterns", { method: "POST", body });
-      toast(p ? "Pattern updated" : "Pattern added");
+      const r = p
+        ? await api("/patterns/" + p.id, { method: "PUT", body })
+        : await api("/patterns", { method: "POST", body });
+      toast(r.warning || (p ? "Pattern updated" : "Pattern added"), !!r.warning);
       go("patterns");
     },
   });
@@ -1119,6 +1149,146 @@ async function viewNetwork(el) {
       <div class="metric"><b style="font-size:17px" class="mono">${esc(r.direct_ip || "—")}</b><span>Without the proxy</span></div>
       <div class="metric ${r.ok ? "ok" : "bad"}"><b style="font-size:17px" class="mono">${esc(r.proxy_ip || "—")}</b><span>Through the proxy</span></div>
     </div><div class="notice ${r.ok ? "good" : "bad"}" style="margin-top:14px">${esc(r.detail)}</div>`;
+  });
+}
+
+/* ================================================================== TLS */
+async function viewTls(el) {
+  const t = await api("/tls");
+  const c = t.installed;
+  const expiring = c && c.days_left <= t.renew_at_days;
+  el.innerHTML =
+    head("HTTPS", "Serve the console and the API over TLS. Without it, session cookies and API keys cross the network in the clear.") +
+    (t.enabled
+      ? `<div class="notice good">HTTPS is on, port ${t.tls_port}.</div>`
+      : `<div class="notice warn">HTTPS is off. Anything you type into this console — passwords, provider keys — is travelling unencrypted.</div>`) +
+    (t.last_error ? `<div class="notice bad">Last attempt failed: ${esc(t.last_error)}</div>` : "") +
+    (c
+      ? `<div class="panel">
+          <div class="panel-head"><h3>Installed certificate</h3>
+            ${c.days_left < 0 ? pill("bad", "expired") : expiring ? pill("warn", `${c.days_left} days left`) : pill("ok", `${c.days_left} days left`)}</div>
+          <div class="panel-body">
+            <div class="grid two">
+              <div>
+                <div class="field-note">Covers</div>
+                <div style="margin:4px 0 12px">${c.domains.map((d) => `<span class="tag">${esc(d)}</span>`).join(" ") || "—"}</div>
+                <div class="field-note">Issued by</div>
+                <div style="margin-top:4px">${esc(c.issuer || "—")}</div>
+              </div>
+              <div>
+                <div class="field-note">Valid until</div>
+                <div style="margin:4px 0 12px">${esc(c.not_after.replace("T", " ").replace("+00:00", ""))}</div>
+                <div class="field-note">Source</div>
+                <div style="margin-top:4px">${esc(t.source || "—")}${t.last_renewal ? ` · renewed ${esc(t.last_renewal.slice(0, 10))}` : ""}</div>
+              </div>
+            </div>
+            <div class="actions" style="margin-top:16px">
+              <label class="toggle"><input type="checkbox" id="tls-on" ${t.enabled ? "checked" : ""}><span class="switch"></span>
+                <span>Serve over HTTPS</span></label>
+              ${t.source.startsWith("letsencrypt") ? `<button class="btn ghost" id="tls-renew">Renew now</button>` : ""}
+            </div>
+            <div class="field-note" style="margin-top:10px">Switching this restarts Avron, which takes a few seconds. ${t.source.startsWith("letsencrypt") ? `Renewal is automatic once the certificate is inside its last ${t.renew_at_days} days.` : ""}</div>
+          </div>
+        </div>`
+      : "") +
+    `<div class="panel">
+      <div class="panel-head"><h3>Let's Encrypt</h3><span class="hint">free, renews itself</span></div>
+      <div class="panel-body">
+        <div class="mode-help" style="margin-top:0">Your domain must already point at this server, and port 80 must reach it. Let's Encrypt fetches a file from <code>http://your-domain/.well-known/acme-challenge/…</code> to prove you control the name.</div>
+        <div class="grid two">
+          <label class="field"><span>Domain names</span>
+            <input type="text" class="mono" id="le-domains" value="${esc(t.domains || "")}" placeholder="avron.example.com, api.example.com">
+            <div class="field-note">Comma separated. All of them must resolve here.</div></label>
+          <label class="field"><span>Email for expiry warnings</span>
+            <input type="text" id="le-contact" value="${esc(t.contact || "")}" placeholder="ops@example.com"></label>
+        </div>
+        <label class="toggle" style="margin-bottom:14px"><input type="checkbox" id="le-staging"><span class="switch"></span>
+          <span>Use the staging service first</span></label>
+        <div class="field-note" style="margin:-8px 0 14px">Staging issues an untrusted certificate but has generous limits. The real service allows five failures per hour per domain, so it is worth one dry run.</div>
+        <div class="actions">
+          <button class="btn" id="le-go">Get a certificate</button>
+        </div>
+        <div id="le-out" style="margin-top:14px"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h3>Upload your own</h3></div>
+      <div class="panel-body">
+        <label class="field"><span>Certificate chain (PEM)</span>
+          <textarea class="mono" id="up-cert" style="min-height:110px" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea>
+          <div class="field-note">Include the intermediates, or some clients will not trust it.</div></label>
+        <label class="field"><span>Private key (PEM)</span>
+          <textarea class="mono" id="up-key" style="min-height:90px" placeholder="-----BEGIN PRIVATE KEY-----&#10;…"></textarea>
+          <div class="field-note">Must not have a passphrase.</div></label>
+        <div class="actions">
+          <button class="btn" id="up-go">Install</button>
+          <button class="btn ghost" id="ss-go">Make a self-signed one</button>
+        </div>
+        <div class="field-note" style="margin-top:8px">A self-signed certificate encrypts the connection but every browser will warn. Useful on a private network, not on the internet.</div>
+        <div id="up-out" style="margin-top:14px"></div>
+      </div>
+    </div>`;
+
+  const restarted = (port) => {
+    $("#view").innerHTML =
+      `<div class="notice good"><strong>Restarting.</strong> Avron is re-binding its socket — this takes a few seconds.
+       Reopen the console at <code>https://&lt;host&gt;:${port}</code> once it is back.</div>`;
+  };
+
+  $("#tls-on")?.addEventListener("change", async (e) => {
+    try {
+      const r = await api("/tls/enable", { method: "POST", body: { enabled: e.target.checked } });
+      restarted(r.port);
+    } catch (err) { e.target.checked = !e.target.checked; toast(err.message, true); }
+  });
+
+  $("#tls-renew")?.addEventListener("click", async (e) => {
+    try {
+      await busy(e.currentTarget, () => api("/tls/renew", { method: "POST" }));
+      toast("Renewed");
+      go("tls");
+    } catch (err) { toast(err.message, true); }
+  });
+
+  $("#le-go").addEventListener("click", async (e) => {
+    const out = $("#le-out");
+    const domains = $("#le-domains").value.split(",").map((x) => x.trim()).filter(Boolean);
+    if (!domains.length) return toast("Add a domain name first", true);
+    out.innerHTML = `<div class="notice">Asking Let's Encrypt to verify ${esc(domains.join(", "))}. This usually takes under a minute.</div>`;
+    try {
+      const r = await busy(e.currentTarget, () =>
+        api("/tls/letsencrypt", {
+          method: "POST",
+          body: { domains, contact: $("#le-contact").value, staging: $("#le-staging").checked },
+        })
+      );
+      out.innerHTML = `<div class="notice good">Issued for ${esc(r.installed.domains.join(", "))}, valid ${r.installed.days_left} days. Switch HTTPS on above.</div>`;
+      go("tls");
+    } catch (err) {
+      out.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`;
+    }
+  });
+
+  $("#up-go").addEventListener("click", async (e) => {
+    const out = $("#up-out");
+    try {
+      const r = await busy(e.currentTarget, () =>
+        api("/tls/upload", {
+          method: "POST",
+          body: { certificate: $("#up-cert").value, private_key: $("#up-key").value },
+        })
+      );
+      out.innerHTML = `<div class="notice good">Installed for ${esc(r.installed.domains.join(", "))}, valid ${r.installed.days_left} days.</div>`;
+      go("tls");
+    } catch (err) { out.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; }
+  });
+
+  $("#ss-go").addEventListener("click", async (e) => {
+    const domain = prompt("Which name should it cover?", t.domains || "localhost");
+    if (!domain) return;
+    await busy(e.currentTarget, () => api("/tls/self-signed", { method: "POST", body: { domain } }));
+    toast("Self-signed certificate installed");
+    go("tls");
   });
 }
 

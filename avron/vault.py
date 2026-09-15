@@ -37,6 +37,9 @@ class Vault:
         # legitimately.
         self.reals: set = set()
         self.modes: Dict[str, str] = {}
+        self._tag_re = None
+        self._lit_re = None
+        self._tag_lookup: Dict[str, str] = {}
 
     def reserve(self, real: str, entity: str) -> str:
         """Allocate a token. Call in document order so <PERSON_1> is the first
@@ -63,6 +66,13 @@ class Vault:
             # token standing for both. Fall back rather than merge them.
             if self.to_real.get(token, real) != real:
                 mode = "tag"
+                token = None
+            elif token == real:
+                # Nothing was hidden: the value is four characters or shorter.
+                # Silently passing it through would be a masking failure that
+                # looks like success.
+                mode = "tag"
+                token = None
         else:
             token = None
 
@@ -74,38 +84,103 @@ class Vault:
         self.to_token[real] = token
         self.to_real[token] = real
         self.modes[token] = mode
+        self._tag_re = None      # matchers are stale now
+        self._lit_re = None
         return token
 
     @property
     def size(self) -> int:
         return len(self.to_real)
 
-    def restore(self, text):
-        """Put the real values back.
+    # A tag written by a model rarely comes back exactly as it was sent:
+    # markdown strips the brackets, title case creeps in, underscores become
+    # spaces or hyphens. Matching strictly leaks the placeholder.
+    #
+    # Matching too loosely is worse. An entity called ORDER produces ORDER_1,
+    # and "please check order 1" is an ordinary sentence — substituting there
+    # injects a real value into text that never contained one. So the looser
+    # separators are only allowed for entity names unlikely to appear in
+    # prose, and an underscore is always required for the rest.
+    _DISTINCTIVE_LEN = 8
 
-        Models routinely mangle the delimiters - markdown bolding turns
-        <PERSON_1> into **PERSON_1**, and some strip the angle brackets
-        entirely. Matching the bare token as well means those still restore
-        instead of leaking a placeholder into the reply.
-        """
+    def _is_distinctive(self, name: str) -> bool:
+        body = name.rsplit("_", 1)[0]          # drop the trailing counter
+        return "_" in body or len(body) >= self._DISTINCTIVE_LEN
+
+    def _tag_pattern(self, token: str) -> str:
+        bare = token.strip("<>")
+        parts = bare.split("_")
+        if self._is_distinctive(bare):
+            # IN_PAN_1, IN_PHONE_NUMBER_2: no sentence looks like these, so
+            # accept "in pan 1", "IN-PAN-1", "INPAN1" as well.
+            return r"[\s_\-]?".join(re.escape(x) for x in parts)
+        # ORDER_1, PERSON_1: underscore required, which "order 1" is not.
+        return r"_".join(re.escape(x) for x in parts)
+
+    def _build(self):
+        """Compile the two matchers. Rebuilt whenever a token is added."""
+        tags, literals = [], []
+        for token in self.to_real:
+            if self.modes.get(token, "tag") == "tag":
+                tags.append(token)
+            else:
+                literals.append(token)
+
+        self._tag_re = None
+        self._tag_lookup = {}
+        if tags:
+            # Longest first so PERSON_10 is not eaten by PERSON_1.
+            ordered = sorted(tags, key=len, reverse=True)
+            alts = []
+            for token in ordered:
+                group = f"t{len(self._tag_lookup)}"
+                self._tag_lookup[group] = self.to_real[token]
+                alts.append(f"(?P<{group}>{self._tag_pattern(token)})")
+            self._tag_re = re.compile(
+                r"[<\[\{`]?(?<![\w])(?:" + "|".join(alts) + r")(?![\w])[>\]\}`]?",
+                re.IGNORECASE,
+            )
+
+        self._lit_re = None
+        if literals:
+            # Surrogates and masked tails are matched exactly, and only as
+            # whole words. A three-character surrogate is otherwise free to
+            # rewrite the middle of an ordinary word.
+            ordered = sorted(literals, key=len, reverse=True)
+            self._lit_re = re.compile(
+                r"(?<!\w)(?:" + "|".join(re.escape(x) for x in ordered) + r")(?!\w)"
+            )
+
+    def restore(self, text):
+        """Put the real values back."""
         if not isinstance(text, str) or not self.to_real:
             return text
-        # Tags are matched with or without their angle brackets, because a
-        # model will happily write **PERSON_1**. Surrogates and masked tails
-        # are matched literally: stripping characters off them would create
-        # false matches against ordinary text.
-        bare = {}
-        for token, value in self.to_real.items():
-            if self.modes.get(token, "tag") == "tag":
-                bare[token.strip("<>")] = value
-            else:
-                bare[token] = value
-        if not any(b in text for b in bare):
-            return text
-        # Longest first so PERSON_10 is not clobbered by PERSON_1.
-        alt = "|".join(re.escape(b) for b in sorted(bare, key=len, reverse=True))
-        pattern = re.compile(r"<?(?<![\w])(" + alt + r")(?![\w])>?")
-        return pattern.sub(lambda m: bare[m.group(1)], text)
+        if self._tag_re is None and self._lit_re is None:
+            self._build()
+
+        if self._lit_re is not None:
+            text = self._lit_re.sub(lambda m: self.to_real[m.group(0)], text)
+
+        if self._tag_re is not None:
+            def swap(m):
+                for group, value in self._tag_lookup.items():
+                    if m.group(group) is not None:
+                        return value
+                return m.group(0)
+
+            text = self._tag_re.sub(swap, text)
+        return text
+
+    def leftovers(self, text: str) -> list:
+        """Tokens still visible after restoring.
+
+        Should always be empty. When it is not, something reached a client
+        with a placeholder in it, which is worth a log line rather than
+        silence.
+        """
+        if not isinstance(text, str):
+            return []
+        return [t for t in self.to_real if t.strip("<>") in text]
 
     def restore_deep(self, obj):
         """Walk any JSON structure and restore every string in it."""
@@ -121,32 +196,49 @@ class Vault:
 class StreamRestorer:
     """Restores placeholders across SSE chunk boundaries.
 
-    A token like <PERSON_1> can arrive split as "<PER" + "SON_1>". Emitting the
-    first half would leak a broken placeholder and lose the substitution, so the
-    trailing word fragment is held back until a non-word character proves it is
-    finished, or it grows too long to be a placeholder.
+    A token arrives in pieces: "<PER" + "SON_1>", or "Person" + "_1", or
+    "PERSON" + " 1". Emitting the first piece leaks a broken placeholder and
+    loses the substitution, so the tail of the buffer is held back for as long
+    as it could still be growing into a token.
+
+    "Could still be growing" is decided against the tokens actually issued,
+    not against a character class, because the separators a model chooses are
+    not predictable.
     """
 
-    MAX_HOLD = 64
+    MAX_HOLD = 80
 
     def __init__(self, vault: Vault) -> None:
         self.vault = vault
         self.buffer = ""
+        self._prefixes = None
 
-    _TAIL = re.compile(r"[<>\w\u2022@.\-/]+$")
+    def _norm(self, text: str) -> str:
+        return re.sub(r"[^A-Za-z0-9]", "", text).upper()
+
+    def _known(self):
+        """Normalised forms of every token, so a partial tail can be tested
+        against them as a prefix."""
+        if self._prefixes is None:
+            self._prefixes = {self._norm(t) for t in self.vault.to_real}
+            self._prefixes.discard("")
+        return self._prefixes
 
     def feed(self, chunk: str) -> str:
         if not self.vault.to_real:
             return chunk
         self.buffer += chunk
-        # Hold back any trailing run of token-shaped characters. A placeholder
-        # can arrive split as "<PER" + "SON_1>", and models often drop the
-        # brackets entirely, so holding only on "<" is not enough.
-        match = self._TAIL.search(self.buffer)
-        if not match or len(self.buffer) - match.start() > self.MAX_HOLD:
-            out, self.buffer = self.buffer, ""
-        else:
-            out, self.buffer = self.buffer[: match.start()], self.buffer[match.start() :]
+        known = self._known()
+
+        hold_at = len(self.buffer)
+        start = max(0, len(self.buffer) - self.MAX_HOLD)
+        for i in range(start, len(self.buffer)):
+            candidate = self._norm(self.buffer[i:])
+            if candidate and any(k.startswith(candidate) for k in known):
+                hold_at = i
+                break
+
+        out, self.buffer = self.buffer[:hold_at], self.buffer[hold_at:]
         return self.vault.restore(out)
 
     def flush(self) -> str:

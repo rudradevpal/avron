@@ -55,24 +55,41 @@ def dedupe(results):
 
 
 # ---------------------------------------------------------------- startup
+@app.get("/.well-known/acme-challenge/{token}", include_in_schema=False)
+def acme_challenge(token: str):
+    """Answers a Let's Encrypt HTTP-01 challenge.
+
+    Also served by the plain-HTTP side-car in run.py. Both exist because the
+    first issuance happens before any certificate does, when this app is the
+    only thing listening.
+    """
+    from fastapi.responses import PlainTextResponse
+
+    from tls import CHALLENGES
+
+    answer = CHALLENGES.get(token)
+    if not answer:
+        raise HTTPException(404, "Unknown challenge")
+    return PlainTextResponse(answer)
+
+
 @app.on_event("startup")
 def startup():
     password = db.init(SEED_PATTERNS, ALL_ENTITIES)
+    db.announce_first_run(password)
+
     from config import config
 
     config.reload()
-    if password:
-        logger.warning(
-            "\n"
-            "==========================================================\n"
-            "  Avron first-run credentials\n"
-            "    username: admin\n"
-            "    password: %s\n"
-            "  Change this immediately at http://<host>:8080/\n"
-            "  It is shown once and is not recoverable from the database.\n"
-            "==========================================================",
-            password,
-        )
+
+    import asyncio
+
+    import tls
+
+    if tls.enabled():
+        # Only does anything for a Let's Encrypt certificate; returns straight
+        # away for an uploaded or self-signed one.
+        asyncio.get_event_loop().create_task(tls.renewal_loop())
 
 
 # ------------------------------------------------------------- masking API

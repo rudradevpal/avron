@@ -7,7 +7,11 @@ services:
     container_name: avron
     hostname: avron
     ports:
-      - "8080:8080"
+      # Plain HTTP. Also where Let's Encrypt fetches its challenge file, so
+      # map it to 80 on the host if you want a certificate issued.
+      - "80:8080"
+      # HTTPS, once a certificate is installed and HTTPS is switched on.
+      - "443:8443"
     environment:
       # The ONLY required setting. Encrypts stored API keys, so it cannot
       # live in the database it protects. Generate once and never change it:
@@ -15,7 +19,9 @@ services:
       MASTER_KEY: "REPLACE_WITH_FERNET_KEY"
 
       DB_PATH: "/data/gateway.db"
-      # Set true when serving the console over HTTPS.
+      TLS_DIR: "/data/tls"
+      # Set true once HTTPS is on, so session cookies stop travelling in the
+      # clear. Avron warns about this in the console until you do.
       COOKIE_SECURE: "false"
 
       # --- first boot only ---------------------------------------------
@@ -24,7 +30,9 @@ services:
       # proxy is configured in the console under Network, not here.
       OPENAI_BASE_URL: "http://myllm.local:3001/v1"
       OPENAI_API_KEY: ""
-      LLM_MODEL: "auto:fast"
+      # Leave blank and pick a real model in the console. Avron does not
+      # substitute an alias; one the provider does not publish just 404s.
+      LLM_MODEL: ""
       USE_LLM: "true"
       SCORE_THRESHOLD: "0.4"
     volumes:

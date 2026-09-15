@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="avron/static/logo.svg" width="72" alt="">
+<img src="avron/static/logo.png" width="96" alt="">
 
 # Avron
 
@@ -145,6 +145,14 @@ to avoid, so it is opt-in and loud about it.
 **Analytics** — p50, p95 and slowest per provider, with token counts. p95 is the
 number your users notice; an average hides the tail.
 
+## HTTPS, handled
+
+Point a domain at the server, enter it in the console, and Avron gets a Let's
+Encrypt certificate over ACME and renews it twice-daily-checked in the
+background. Or paste a PEM pair you already have — the key is checked against
+the certificate before anything is written, because a mismatched pair installs
+happily and then fails at handshake time.
+
 ## Access
 
 Avron issues its own API keys. A client sends an `avron-…` key; Avron verifies
@@ -174,7 +182,9 @@ step, no CDN. It works with the machine fully offline.
   personal data in text you have already scrubbed. Point it at a local model, or
   switch it off per endpoint. [Details →](docs/security.md)
 - **Turn on key enforcement.**
-- **Serve the console over HTTPS** and set `COOKIE_SECURE=true`.
+- **Turn on HTTPS.** Avron gets a Let's Encrypt certificate itself and renews it
+  in the background, or takes a PEM pair you already have. Then set
+  `COOKIE_SECURE=true`.
 - **Images are not scanned.** Text inside a screenshot passes through.
 - **Benchmark on your own labelled sample.** The regexes are the easy part; name
   and address recall is where the gaps are.
@@ -192,6 +202,7 @@ step, no CDN. It works with the machine fully offline.
 | [Usage](docs/usage.md) | SDKs, agents, pipelines |
 | [Operations](docs/operations.md) | Backup, upgrade, monitoring |
 | [Security](docs/security.md) | Threat model and known limits |
+| [HTTPS](docs/tls.md) | TLS, Let's Encrypt, automatic renewal |
 | [Egress proxy](docs/egress-proxy.md) | Routing outbound traffic |
 
 ## Built on

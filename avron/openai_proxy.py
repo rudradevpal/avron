@@ -8,6 +8,7 @@ for the configured roles.
 
 import json
 import logging
+import re
 import time
 from typing import List
 
@@ -33,6 +34,32 @@ STRIP = {
 }
 
 
+# spaCy's NER was trained on prose. Fed source code it labels file names and
+# identifiers as people and places, which then get masked and make the prompt
+# unreadable. These are the shapes no human name has.
+_CODEY = re.compile(
+    r"""(?x)
+    ^\S*\.(?:py|js|ts|jsx|tsx|md|json|ya?ml|html?|css|txt|sh|go|rs|java|rb|
+              php|c|cpp|h|sql|toml|ini|cfg|lock|env|xml|svg|png|jpe?g|gif)$
+    | ^[A-Za-z_]+(?:_[A-Za-z0-9_]+)+$        # snake_case_identifier
+    | ^\S*/\S*$                             # a path
+    | ^[a-z]+[A-Z]\S*$                       # camelCase
+    """
+)
+_NAME_LIKE = {"PERSON", "LOCATION", "ORGANIZATION", "NRP"}
+
+
+def _drop_code_noise(results, text: str):
+    kept = []
+    for r in results:
+        span = text[r.start : r.end]
+        if r.entity_type in _NAME_LIKE and _CODEY.match(span.strip()):
+            logger.debug("Dropping %s on code-like span %r", r.entity_type, span)
+            continue
+        kept.append(r)
+    return kept
+
+
 async def analyze_text(text: str, entities=None, use_llm=None):
     """Rules + optional LLM pass + overlap dedupe."""
     from main import dedupe
@@ -48,7 +75,7 @@ async def analyze_text(text: str, entities=None, use_llm=None):
         from llm_pass import analyze_with_llm
 
         results += await analyze_with_llm(text, cfg)
-    return dedupe(results)
+    return dedupe(_drop_code_noise(results, text))
 
 
 # --------------------------------------------------------------- masking
@@ -325,6 +352,15 @@ async def proxy(full_path: str, request: Request):
             data = vault.restore_deep(payload_json)
             if isinstance(data, dict) and vault.size:
                 data["x_pii_masked"] = vault.size
+                leaked = vault.leftovers(json.dumps(data))
+                if leaked:
+                    # Should never happen. If it does, a client received a
+                    # placeholder instead of a value, and that is worth
+                    # knowing about rather than discovering in a screenshot.
+                    logger.warning(
+                        "Placeholders survived restoration on %s: %s",
+                        route["prefix"], ", ".join(leaked[:5]),
+                    )
 
             if db.capture_enabled():
                 db.record_capture(

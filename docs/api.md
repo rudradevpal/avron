@@ -119,4 +119,7 @@ Everything under `/api` requires a session cookie from `POST /api/login`.
 | GET | `/api/stats`, `/api/audit` | Counters and change log |
 | GET/DELETE | `/api/captures` | Recorded requests; detail at `/api/captures/{id}` decrypts one |
 | GET/POST/DELETE | `/api/users` | Accounts and roles. Administrators only. |
+| GET | `/api/tls` | Certificate status and renewal state |
+| POST | `/api/tls/upload`, `/api/tls/letsencrypt`, `/api/tls/self-signed` | Install a certificate |
+| POST | `/api/tls/enable`, `/api/tls/renew` | Switch HTTPS, force a renewal |
 | POST | `/api/test/detect`, `/api/test/llm`, `/api/test/proxy` | Diagnostics |

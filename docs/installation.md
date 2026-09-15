@@ -52,6 +52,12 @@ that are fast.
 The console blocks you on the password-change screen until you rotate it. The
 password is shown once and is not recoverable from the database.
 
+## HTTPS
+
+Avron can get its own Let's Encrypt certificate once it is running and your
+domain points at it. The compose file already maps port 80, which is what the
+challenge needs. See [tls.md](tls.md).
+
 ## Networking
 
 The compose file publishes 8080 on all interfaces and joins no custom network.

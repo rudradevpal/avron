@@ -96,6 +96,8 @@ so `/api`, `/health` and the static mount always win over the catch-all.
 | `admin_api.py` | Console REST API |
 | `net.py` | Outbound proxy and bypass handling |
 | `providers.py` | Provider presets and auth header styles |
+| `tls.py` | Certificate storage, ACME v2 client, renewal loop |
+| `run.py` | Launcher: binds the TLS socket, serves ACME challenges |
 | `llm_pass.py` | Detection-model span extraction |
 
 ## Data model

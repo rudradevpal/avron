@@ -264,6 +264,12 @@ INDIA_PATTERNS = [
      "regex": r"\b(?:[0-9A-Fa-f]{1,4}:){2,7}(?::|[0-9A-Fa-f]{1,4})\b",
      "validator": "none",
      "context": ["ip", "ipv6", "address", "host", "client", "remote"]},
+    {"entity": "URL", "name": "URL with scheme", "score": 0.8,
+     "regex": r"\bhttps?://[^\s<>\"']+", "validator": "none",
+     "context": ["url", "link", "site", "page", "http", "visit"]},
+    {"entity": "URL", "name": "URL starting www", "score": 0.7,
+     "regex": r"\bwww\.[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "validator": "none",
+     "context": ["url", "link", "site", "page", "visit"]},
     {"entity": "MAC_ADDRESS", "name": "MAC address", "score": 0.8,
      "regex": r"\b[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}\b",
      "validator": "none",
@@ -440,6 +446,41 @@ ALL_ENTITIES = sorted(set(SEED_ENTITIES + PRESIDIO_ENTITIES + LLM_ONLY_ENTITIES)
 
 # Nested quantifiers can hang the process on a crafted input. Rejected on save.
 _DANGEROUS = re.compile(r"\([^)]*[+*]\)[+*]")
+
+
+# Entity names that also read as ordinary English. A tag built from one of
+# these — ORDER_1, KEY_1 — can be matched in a sentence the model wrote about
+# something else, and the real value would be substituted into it.
+PROSE_WORDS = {
+    "ORDER", "ITEM", "CODE", "REF", "KEY", "PIN", "ACCOUNT", "NAME", "USER",
+    "DATE", "TIME", "FILE", "PATH", "TYPE", "VALUE", "NOTE", "LINE", "PAGE",
+    "TITLE", "LABEL", "GROUP", "STATUS", "LEVEL", "PRICE", "TOTAL", "COUNT",
+    "NUMBER", "ADDRESS", "PHONE", "EMAIL", "CARD", "TOKEN", "LINK", "IMAGE",
+    "TEXT", "DATA", "ROW", "COLUMN", "FIELD", "FORM", "STEP", "TASK", "CASE",
+    "ISSUE", "TICKET", "RESULT", "REPORT", "PERSON",
+}
+
+
+def entity_warning(entity: str) -> str:
+    """Advisory on an entity name. Never blocks a save.
+
+    A tag is only as safe as its name is unusual. This is the one place a
+    person can be told before it matters.
+    """
+    body = (entity or "").upper()
+    if body in PROSE_WORDS:
+        return (
+            f"\u201c{body}\u201d is an ordinary word, so a sentence like "
+            f"\u201cthe {body.lower()}_1 field\u201d could be mistaken for this "
+            "tag and replaced with a real value. Prefix it with something of "
+            f"your own, for example ACME_{body}."
+        )
+    if len(body.replace("_", "")) < 4:
+        return (
+            "Very short names collide easily with ordinary text. Something "
+            "longer, or prefixed, is safer."
+        )
+    return ""
 
 
 def regex_problem(pattern: str) -> str:

@@ -16,6 +16,7 @@ the data; your code never sees a placeholder.
 | [usage.md](usage.md) | Wiring up SDKs, agents and pipelines |
 | [operations.md](operations.md) | Backup, upgrade, monitoring, troubleshooting |
 | [security.md](security.md) | Threat model, key handling, known limits |
+| [tls.md](tls.md) | HTTPS, Let's Encrypt, automatic renewal |
 | [egress-proxy.md](egress-proxy.md) | Routing outbound traffic through a proxy |
 | [../NOTICE.md](../NOTICE.md) | Third-party components and licences |
 

@@ -4,6 +4,7 @@ import json
 import re
 from typing import List, Optional
 
+import os
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -382,6 +383,9 @@ def _validate(p: PatternIn):
 @router.post("/patterns")
 def add_pattern(p: PatternIn, user: dict = Depends(admin)):
     _validate(p)
+    from patterns import entity_warning
+
+    warning = entity_warning(p.entity)
     cur = db.db().execute(
         "INSERT INTO patterns(pack,redaction,shape,entity,name,regex,score,"
         "context,validator,enabled,builtin) VALUES(?,?,?,?,?,?,?,?,?,?,0)",
@@ -393,7 +397,7 @@ def add_pattern(p: PatternIn, user: dict = Depends(admin)):
     )
     db.db().commit()
     _reload_or_rollback(cur.lastrowid, user, "pattern_create", p.name)
-    return {"ok": True, "id": cur.lastrowid}
+    return {"ok": True, "id": cur.lastrowid, "warning": warning}
 
 
 @router.put("/patterns/{pid}")
@@ -422,8 +426,10 @@ def edit_pattern(pid: int, p: PatternIn, user: dict = Depends(admin)):
         db.db().commit()
         config.reload()
         raise HTTPException(400, f"Rejected, previous version restored: {exc}")
+    from patterns import entity_warning
+
     db.audit(user["username"], "pattern_update", p.name)
-    return {"ok": True}
+    return {"ok": True, "warning": entity_warning(p.entity)}
 
 
 @router.delete("/patterns/{pid}")
@@ -511,6 +517,17 @@ def preview_surrogate(body: SurrogatePreview, user: dict = Depends(admin)):
             out = f"<{body.entity}_{len(rows) + 1}>"
         rows.append({"real": sample, "stand_in": out})
     return {"error": "", "shape": shape, "rows": rows}
+
+
+class EntityCheck(BaseModel):
+    entity: str
+
+
+@router.post("/entities/check")
+def check_entity_name(body: EntityCheck, user: dict = Depends(admin)):
+    from patterns import entity_warning
+
+    return {"warning": entity_warning(body.entity)}
 
 
 class ShapeFrom(BaseModel):
@@ -718,20 +735,35 @@ async def test_upstream(body: UpstreamTest, user: dict = Depends(admin)):
         ).fetchone()
         token = db.decrypt(row["token"]) if row else ""
     import net
+    import providers as _prov
 
+    base = body.url.rstrip("/")
+    headers = _prov.auth_headers(body.provider_type, token or "")
     try:
-        import providers as _prov
-
         async with net.client(30, body.url) as client:
-            r = await client.post(
-                f"{body.url.rstrip('/')}/chat/completions",
-                headers=_prov.auth_headers(body.provider_type, token or ""),
-                json={"model": body.model or "auto:fast", "max_tokens": 5,
-                      "messages": [{"role": "user", "content": "reply OK"}]},
-            )
+            if body.model.strip():
+                r = await client.post(
+                    f"{base}/chat/completions",
+                    headers=headers,
+                    json={"model": body.model, "max_tokens": 5,
+                          "messages": [{"role": "user", "content": "reply OK"}]},
+                )
+            else:
+                # No model named: check reachability and credentials by asking
+                # for the catalogue, rather than guessing a model name that may
+                # not exist on this provider.
+                r = await client.get(f"{base}/models", headers=headers)
+        detail = ""
+        if r.status_code != 200:
+            detail = r.text[:300]
+        elif not body.model.strip():
+            try:
+                detail = f"{len(r.json().get('data', []))} models available"
+            except Exception:  # noqa: BLE001
+                pass
         return {"ok": r.status_code == 200, "status": r.status_code,
                 "routed_via": r.headers.get("x-routed-via", ""),
-                "detail": "" if r.status_code == 200 else r.text[:300]}
+                "detail": detail}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "status": 0, "detail": str(exc)}
 
@@ -821,32 +853,28 @@ async def route_models(rid: int, user: dict = Depends(admin)):
                     ),
                 )
                 r.raise_for_status()
+                provider_name = u["name"] or u["url"]
                 for m in r.json().get("data", []):
                     mid = m.get("id")
-                    if not mid or mid in seen:
+                    # Deduplicate per provider, not globally: the same id on
+                    # two providers is two different places to send a request.
+                    if not mid or (provider_name, mid) in seen:
                         continue
-                    seen.add(mid)
-                    # Model ids arrive in two shapes: bare ("gpt-4o-mini") and
-                    # namespaced ("openai/gpt-4o-mini"). Split so the picker can
-                    # group by vendor either way.
-                    vendor, _, short = mid.partition("/")
-                    if not short:
-                        vendor, short = (m.get("owned_by") or
-                                         u.get("provider_type") or "other"), mid
+                    seen.add((provider_name, mid))
                     out.append({
-                        "id": mid, "vendor": vendor, "short": short,
+                        "id": mid,
                         "owned_by": m.get("owned_by", ""),
-                        "upstream": u["name"] or u["url"],
+                        "upstream": provider_name,
                     })
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{u['name'] or u['url']}: {exc}")
-    out.sort(key=lambda m: m["id"])
+    out.sort(key=lambda m: (m["upstream"], m["id"]))
     return {"models": out, "errors": errors}
 
 
 class PlaygroundRun(BaseModel):
     route_id: int
-    model: str = "auto:fast"
+    model: str = ""
     prompt: str
     system: str = ""
     temperature: float = 0.7
@@ -866,6 +894,8 @@ async def playground(body: PlaygroundRun, user: dict = Depends(admin)):
     from balancer import pool
     from vault import Vault
 
+    if not body.model.strip():
+        raise HTTPException(400, "Choose a model. Avron does not invent one.")
     route = None
     for r in config.routes():
         if r["id"] == body.route_id:
@@ -1166,6 +1196,139 @@ async def generate_pattern(body: PatternDraft, user: dict = Depends(admin)):
         "context": [str(c).lower()[:40] for c in (draft.get("context") or [])][:12],
         "samples": [str(x)[:300] for x in samples][:4],
     }
+
+
+# ------------------------------------------------------------------ TLS
+@router.get("/tls")
+def tls_status(user: dict = Depends(admin)):
+    import tls
+
+    info = tls.current()
+    return {
+        "enabled": db.get_setting("tls_enabled", "false") == "true",
+        "installed": info,
+        "source": db.get_setting("tls_source", ""),
+        "domains": db.get_setting("tls_domains", ""),
+        "contact": db.get_setting("tls_contact", ""),
+        "last_renewal": db.get_setting("tls_last_renewal", ""),
+        "last_error": db.get_setting("tls_last_error", ""),
+        "renew_at_days": tls.RENEW_WHEN_DAYS_LEFT,
+        "tls_port": int(os.getenv("TLS_PORT", "8443")),
+    }
+
+
+class CertUpload(BaseModel):
+    certificate: str
+    private_key: str
+
+
+@router.post("/tls/upload")
+def upload_cert(body: CertUpload, user: dict = Depends(admin)):
+    import tls
+
+    cert = body.certificate.strip().encode()
+    key = body.private_key.strip().encode()
+    problem = tls.validate_pair(cert, key)
+    if problem:
+        raise HTTPException(400, problem)
+    info = tls.install(cert, key)
+    db.set_setting("tls_source", "uploaded")
+    db.set_setting("tls_domains", ",".join(info["domains"]))
+    db.set_setting("tls_last_error", "")
+    db.audit(user["username"], "tls_upload", ", ".join(info["domains"]))
+    return {"ok": True, "installed": info}
+
+
+class AcmeRequest(BaseModel):
+    domains: List[str]
+    contact: str = ""
+    staging: bool = False
+
+
+@router.post("/tls/letsencrypt")
+async def request_cert(body: AcmeRequest, user: dict = Depends(admin)):
+    """Issue over ACME. Blocks for as long as validation takes, which is
+    usually under a minute and occasionally two."""
+    import tls
+
+    db.set_setting("tls_contact", body.contact)
+    try:
+        info = await tls.issue(body.domains, body.contact, body.staging)
+    except tls.AcmeError as exc:
+        db.set_setting("tls_last_error", str(exc)[:400])
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        db.set_setting("tls_last_error", str(exc)[:400])
+        raise HTTPException(502, f"Could not reach Let's Encrypt: {exc}")
+    db.audit(user["username"], "tls_issue", ", ".join(body.domains))
+    return {"ok": True, "installed": info}
+
+
+@router.post("/tls/renew")
+async def renew_now(user: dict = Depends(admin)):
+    import tls
+
+    info = await tls.renew_if_due(force=True)
+    if not info:
+        raise HTTPException(
+            400, db.get_setting("tls_last_error", "")
+            or "Nothing to renew. Only Let's Encrypt certificates renew here."
+        )
+    db.audit(user["username"], "tls_renew", ", ".join(info["domains"]))
+    return {"ok": True, "installed": info}
+
+
+class TlsToggle(BaseModel):
+    enabled: bool
+
+
+@router.post("/tls/enable")
+def set_tls(body: TlsToggle, user: dict = Depends(admin)):
+    """Turning TLS on or off restarts the process, because uvicorn binds its
+    socket once at start. The response is sent first, then the restart."""
+    import threading
+
+    import tls
+
+    if body.enabled and not tls.CERT_PATH.exists():
+        raise HTTPException(400, "Install a certificate first.")
+    db.set_setting("tls_enabled", "true" if body.enabled else "false")
+    db.audit(user["username"], "tls_toggle", str(body.enabled))
+
+    def later():
+        import time
+
+        time.sleep(1.0)
+        try:
+            from run import restart
+
+            restart()
+        except Exception:  # noqa: BLE001
+            os._exit(0)     # the restart policy brings it back
+
+    threading.Thread(target=later, daemon=True).start()
+    return {
+        "ok": True,
+        "restarting": True,
+        "port": int(os.getenv("TLS_PORT", "8443")) if body.enabled
+        else int(os.getenv("PORT", "8080")),
+    }
+
+
+class SelfSigned(BaseModel):
+    domain: str
+
+
+@router.post("/tls/self-signed")
+def make_self_signed(body: SelfSigned, user: dict = Depends(admin)):
+    import tls
+
+    cert, key = tls.self_signed(body.domain.strip() or "localhost")
+    info = tls.install(cert, key)
+    db.set_setting("tls_source", "self-signed")
+    db.set_setting("tls_domains", body.domain)
+    db.audit(user["username"], "tls_self_signed", body.domain)
+    return {"ok": True, "installed": info}
 
 
 @router.get("/stats")

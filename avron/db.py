@@ -187,7 +187,7 @@ DEFAULT_SETTINGS = {
     "llm_enabled": "true",
     "llm_base_url": "https://api.openai.com/v1",
     "llm_token": "",  # stored encrypted
-    "llm_model": "auto:fast",
+    "llm_model": "",
     "llm_timeout": "90",
     "llm_score": "0.75",
     "llm_entities": json.dumps(
@@ -208,6 +208,12 @@ DEFAULT_SETTINGS = {
     "capture_limit": "200",
     # Days, not minutes. Kept short by default because these rows hold
     # unmasked text; raise it deliberately, not by habit.
+    "tls_enabled": "false",
+    "tls_source": "",          # uploaded | letsencrypt | letsencrypt-staging
+    "tls_domains": "",
+    "tls_contact": "",
+    "tls_last_renewal": "",
+    "tls_last_error": "",
     "capture_days": "1",
     "audit_days": "90",
     "audit_limit": "5000",
@@ -231,6 +237,27 @@ def db() -> sqlite3.Connection:
     if _conn is None:
         _conn = connect()
     return _conn
+
+
+def announce_first_run(password: Optional[str]) -> None:
+    """Print the generated admin password exactly once.
+
+    Both run.py and the app call init(); only one of them gets the password
+    back, so the banner lives here rather than in either caller.
+    """
+    if not password:
+        return
+    logging.getLogger("avron").warning(
+        "\n"
+        "==========================================================\n"
+        "  Avron first-run credentials\n"
+        "    username: admin\n"
+        "    password: %s\n"
+        "  Change this immediately. It is shown once and is not\n"
+        "  recoverable from the database.\n"
+        "==========================================================",
+        password,
+    )
 
 
 def now() -> str:

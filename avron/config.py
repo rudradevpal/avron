@@ -76,6 +76,15 @@ class ConfigManager:
         registry = RecognizerRegistry()
         registry.load_predefined_recognizers(nlp_engine=nlp, languages=["en"])
 
+        # Presidio's URL recognizer treats any dotted token as a host, so
+        # "db.py" and "README.md" come back as URLs. In a codebase that is
+        # most of the text. Ours requires a scheme or www, and lives in the
+        # network pack where it can be switched off.
+        try:
+            registry.remove_recognizer("UrlRecognizer")
+        except Exception:  # noqa: BLE001
+            logger.debug("No UrlRecognizer to remove")
+
         grouped: Dict[tuple, dict] = {}
         rows = db.db().execute(
             "SELECT * FROM patterns WHERE enabled=1 ORDER BY entity, id"
@@ -162,7 +171,7 @@ class ConfigManager:
             "enabled": db.get_setting("llm_enabled", "true") == "true",
             "base_url": db.get_setting("llm_base_url").rstrip("/"),
             "token": db.get_secret("llm_token"),
-            "model": db.get_setting("llm_model", "auto:fast"),
+            "model": db.get_setting("llm_model", ""),
             "timeout": float(db.get_setting("llm_timeout", "90") or 90),
             "score": float(db.get_setting("llm_score", "0.75") or 0.75),
             "entities": json.loads(db.get_setting("llm_entities", "[]") or "[]"),
