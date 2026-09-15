@@ -283,27 +283,53 @@ def get_entities(user: dict = Depends(admin)):
         )
     }
     llm_entities = json.loads(db.get_setting("llm_entities", "[]") or "[]")
-    return [
-        {
-            "entity": r["entity"],
-            "enabled": bool(r["enabled"]),
-            "patterns": counts.get(r["entity"], 0),
-            "source": "llm" if r["entity"] in llm_entities else (
-                "rules" if counts.get(r["entity"]) else "presidio"
-            ),
-        }
-        for r in rows
-    ]
+    from surrogate import DEFAULT_SHAPES, STRATEGIES
+
+    return {
+        "strategies": STRATEGIES,
+        "entities": [
+            {
+                "entity": r["entity"],
+                "enabled": bool(r["enabled"]),
+                "redaction": r["redaction"] or "tag",
+                "shape": r["shape"] or DEFAULT_SHAPES.get(r["entity"], ""),
+                "patterns": counts.get(r["entity"], 0),
+                "source": "llm" if r["entity"] in llm_entities else (
+                    "rules" if counts.get(r["entity"]) else "presidio"
+                ),
+            }
+            for r in rows
+        ],
+    }
 
 
 @router.put("/entities")
 def put_entities(body: List[dict], user: dict = Depends(admin)):
+    from surrogate import STRATEGIES, shape_problem
+
     for item in body:
-        db.db().execute(
-            "INSERT INTO entity_toggles(entity,enabled) VALUES(?,?) "
-            "ON CONFLICT(entity) DO UPDATE SET enabled=excluded.enabled",
-            (item["entity"], 1 if item.get("enabled") else 0),
-        )
+        entity = item["entity"]
+        if "redaction" in item:
+            mode = item.get("redaction", "tag")
+            if mode not in STRATEGIES:
+                raise HTTPException(400, "Unknown replacement style.")
+            shape = item.get("shape", "")
+            if mode == "surrogate":
+                bad = shape_problem(shape)
+                if bad:
+                    raise HTTPException(400, f"{entity}: {bad}")
+            db.db().execute(
+                "INSERT INTO entity_toggles(entity,enabled,redaction,shape) "
+                "VALUES(?,1,?,?) ON CONFLICT(entity) DO UPDATE SET "
+                "redaction=excluded.redaction, shape=excluded.shape",
+                (entity, mode, shape),
+            )
+        if "enabled" in item:
+            db.db().execute(
+                "INSERT INTO entity_toggles(entity,enabled) VALUES(?,?) "
+                "ON CONFLICT(entity) DO UPDATE SET enabled=excluded.enabled",
+                (entity, 1 if item.get("enabled") else 0),
+            )
     db.db().commit()
     db.audit(user["username"], "entities_update", f"{len(body)} toggles")
     return {"ok": True}
@@ -312,6 +338,8 @@ def put_entities(body: List[dict], user: dict = Depends(admin)):
 # -------------------------------------------------------------- patterns
 class PatternIn(BaseModel):
     pack: str = "custom"
+    redaction: str = "tag"
+    shape: str = ""
     entity: str
     name: str
     regex: str
@@ -327,12 +355,15 @@ def list_patterns(user: dict = Depends(admin)):
     return [
         {**dict(r), "context": json.loads(r["context"] or "[]"),
          "pack": r["pack"] if "pack" in r.keys() else "custom",
+         "redaction": r["redaction"] or "tag", "shape": r["shape"] or "",
          "enabled": bool(r["enabled"]), "builtin": bool(r["builtin"])}
         for r in rows
     ]
 
 
 def _validate(p: PatternIn):
+    from surrogate import STRATEGIES, shape_problem
+
     if not re.fullmatch(r"[A-Z][A-Z0-9_]{2,39}", p.entity):
         raise HTTPException(400, "Entity must be UPPER_SNAKE_CASE, 3-40 chars.")
     problem = regex_problem(p.regex)
@@ -340,16 +371,22 @@ def _validate(p: PatternIn):
         raise HTTPException(400, problem)
     if p.validator not in VALIDATOR_HELP:
         raise HTTPException(400, "Unknown validator.")
+    if p.redaction not in STRATEGIES:
+        raise HTTPException(400, "Unknown replacement style.")
+    if p.redaction == "surrogate":
+        bad = shape_problem(p.shape)
+        if bad:
+            raise HTTPException(400, bad)
 
 
 @router.post("/patterns")
 def add_pattern(p: PatternIn, user: dict = Depends(admin)):
     _validate(p)
     cur = db.db().execute(
-        "INSERT INTO patterns(pack,entity,name,regex,score,context,validator,"
-        "enabled,builtin) VALUES(?,?,?,?,?,?,?,?,0)",
-        ("custom", p.entity, p.name, p.regex, p.score, json.dumps(p.context),
-         p.validator, 1 if p.enabled else 0),
+        "INSERT INTO patterns(pack,redaction,shape,entity,name,regex,score,"
+        "context,validator,enabled,builtin) VALUES(?,?,?,?,?,?,?,?,?,?,0)",
+        ("custom", p.redaction, p.shape, p.entity, p.name, p.regex, p.score,
+         json.dumps(p.context), p.validator, 1 if p.enabled else 0),
     )
     db.db().execute(
         "INSERT OR IGNORE INTO entity_toggles(entity,enabled) VALUES(?,1)", (p.entity,)
@@ -366,10 +403,10 @@ def edit_pattern(pid: int, p: PatternIn, user: dict = Depends(admin)):
     if not before:
         raise HTTPException(404, "Pattern not found.")
     db.db().execute(
-        "UPDATE patterns SET entity=?,name=?,regex=?,score=?,context=?,validator=?,"
-        "enabled=? WHERE id=?",
+        "UPDATE patterns SET entity=?,name=?,regex=?,score=?,context=?,"
+        "validator=?,enabled=?,redaction=?,shape=? WHERE id=?",
         (p.entity, p.name, p.regex, p.score, json.dumps(p.context), p.validator,
-         1 if p.enabled else 0, pid),
+         1 if p.enabled else 0, p.redaction, p.shape, pid),
     )
     db.db().commit()
     try:
@@ -377,9 +414,10 @@ def edit_pattern(pid: int, p: PatternIn, user: dict = Depends(admin)):
     except Exception as exc:  # noqa: BLE001
         db.db().execute(
             "UPDATE patterns SET entity=?,name=?,regex=?,score=?,context=?,"
-            "validator=?,enabled=? WHERE id=?",
+            "validator=?,enabled=?,redaction=?,shape=? WHERE id=?",
             (before["entity"], before["name"], before["regex"], before["score"],
-             before["context"], before["validator"], before["enabled"], pid),
+             before["context"], before["validator"], before["enabled"],
+             before["redaction"], before["shape"], pid),
         )
         db.db().commit()
         config.reload()
@@ -436,6 +474,55 @@ def test_pattern(body: PatternTest, user: dict = Depends(admin)):
     except re.error as exc:
         return {"error": str(exc), "matches": []}
     return {"error": "", "matches": matches}
+
+
+class SurrogatePreview(BaseModel):
+    entity: str = "SAMPLE"
+    redaction: str = "surrogate"
+    shape: str = ""
+    samples: List[str] = []
+
+
+@router.post("/surrogate/preview")
+def preview_surrogate(body: SurrogatePreview, user: dict = Depends(admin)):
+    """Show what the model would actually receive, before anything is saved."""
+    from surrogate import (DEFAULT_SHAPES, SurrogateFactory, infer_shape,
+                           last_four, shape_problem)
+
+    shape = body.shape or DEFAULT_SHAPES.get(body.entity, "")
+    if body.redaction == "surrogate":
+        if not shape and body.samples:
+            shape = infer_shape(body.samples[0])
+        bad = shape_problem(shape)
+        if bad:
+            return {"error": bad, "shape": shape, "rows": []}
+
+    factory = SurrogateFactory()
+    rows = []
+    for sample in (body.samples or [])[:6]:
+        sample = sample.strip()
+        if not sample:
+            continue
+        if body.redaction == "surrogate":
+            out = factory.make(body.entity, sample, shape)
+        elif body.redaction == "last4":
+            out = last_four(sample)
+        else:
+            out = f"<{body.entity}_{len(rows) + 1}>"
+        rows.append({"real": sample, "stand_in": out})
+    return {"error": "", "shape": shape, "rows": rows}
+
+
+class ShapeFrom(BaseModel):
+    sample: str
+
+
+@router.post("/surrogate/infer")
+def infer_from_sample(body: ShapeFrom, user: dict = Depends(admin)):
+    from surrogate import infer_shape, shape_problem
+
+    shape = infer_shape(body.sample.strip())
+    return {"shape": shape, "error": shape_problem(shape)}
 
 
 # ---------------------------------------------------------------- routes
@@ -794,7 +881,7 @@ async def playground(body: PlaygroundRun, user: dict = Depends(admin)):
 
     from openai_proxy import _mask_messages
 
-    vault = Vault()
+    vault = Vault(config.redaction_map())
     messages = []
     if body.system:
         messages.append({"role": "system", "content": body.system})

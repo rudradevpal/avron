@@ -7,20 +7,23 @@ Change the base URL. Nothing else.
 ```python
 # OpenAI SDK
 from openai import OpenAI
-client = OpenAI(base_url="http://avron:8080/v1", api_key="anything")
+client = OpenAI(base_url="http://avron:8080/v1", api_key="avron-YOUR-KEY")
 
 # LangChain / LangGraph
 from langchain_openai import ChatOpenAI
 llm = ChatOpenAI(base_url="http://avron:8080/v1",
-                 api_key="anything", model="gpt-4o-mini")
+                 api_key="avron-YOUR-KEY", model="gpt-4o-mini")
 ```
 
 The same applies to CrewAI, AutoGen, LlamaIndex, Pydantic-AI, Aider, Continue,
 and anything else that accepts an OpenAI base URL. In n8n, set the Base URL
 field on the OpenAI credential.
 
-If a provider key is stored on the endpoint, `api_key` can be any placeholder —
-clients never hold the real credential.
+Create the key under **API keys** in the console. It authenticates the client to
+Avron; the real provider credential is stored on the endpoint and swapped in on
+the way out, so clients never hold it.
+
+While key enforcement is off, `api_key` can be any placeholder.
 
 ## Agents
 

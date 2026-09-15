@@ -354,7 +354,7 @@ function upstreamRow(u = {}, index = 0) {
 
 async function routeModal(route) {
   if (!state.cache.providers) state.cache.providers = await api("/providers");
-  const entities = await api("/entities");
+  const entities = (await api("/entities")).entities;
   const strategies = state.cache.strategies || (await api("/strategies"));
   const chosen = new Set(route?.entities || []);
   const roles = new Set(route?.mask_roles || ["user"]);
@@ -590,7 +590,19 @@ The account is held jointly with Lakshmi Narayanan, UPI lakshmi@okhdfcbank, IFSC
         }</div>`;
         return;
       }
-      const hl = (t) => esc(t).replace(/&lt;[A-Z][A-Z0-9_]*_\d+&gt;/g, (m) => `<mark class="ph">${m}</mark>`);
+      const tokens = (r.placeholders || []).map((p) => p.token);
+      const hl = (t) => {
+        let html = esc(t).replace(/&lt;[A-Z][A-Z0-9_]*_\d+&gt;/g, (m) => `<mark class="ph">${m}</mark>`);
+        // Surrogates look like ordinary data, so highlight them explicitly or
+        // you cannot tell what the model was actually shown.
+        tokens
+          .filter((x) => !x.startsWith("<"))
+          .sort((a, b) => b.length - a.length)
+          .forEach((tok) => {
+            html = html.split(esc(tok)).join(`<mark class="sur">${esc(tok)}</mark>`);
+          });
+        return html;
+      };
       out.innerHTML =
         `<div class="grid four" style="margin-bottom:16px">
           <div class="metric info"><b>${r.masked_count}</b><span>Values masked</span></div>
@@ -661,10 +673,15 @@ async function viewAnalytics(el) {
 }
 
 /* ============================================================ detection */
+const MODE_LABEL = { tag: "Name tag", surrogate: "Lookalike", last4: "Last 4" };
+const MODE_PILL = { tag: "info", surrogate: "ok", last4: "warn" };
+
 async function viewDetection(el) {
-  const [entities, settings] = await Promise.all([api("/entities"), api("/settings")]);
+  const [d, settings] = await Promise.all([api("/entities"), api("/settings")]);
+  const entities = d.entities;
+  state.cache.strategyHelp = d.strategies;
   el.innerHTML =
-    head("Entities", "Turn individual data types on or off, and set how confident the engine must be before it masks something.") +
+    head("Entities", "What gets detected, and what the model sees in its place.") +
     `<div class="panel">
       <div class="panel-head"><h3>Confidence</h3></div>
       <div class="panel-body" style="max-width:360px">
@@ -675,21 +692,22 @@ async function viewDetection(el) {
       </div>
     </div>
     <div class="panel">
-      <div class="panel-head"><h3>Data types</h3><span class="hint">${entities.filter((e) => e.enabled).length} of ${entities.length} on</span></div>
+      <div class="panel-head"><h3>Data types</h3>
+        <span class="hint">${entities.filter((e) => e.enabled).length} of ${entities.length} detected</span></div>
       ${table(
         [
           { label: "Type", cell: (e) => `<code>${esc(e.entity)}</code>` },
-          { label: "Found by", cell: (e) => e.source === "llm" ? pill("info", "detection model") : e.source === "rules" ? pill("ok", "patterns") : pill("idle", "built in") },
-          { label: "Patterns", num: true, cell: (e) => e.patterns || "—" },
+          { label: "Found by", cell: (e) => e.source === "llm" ? pill("info", "model") : e.source === "rules" ? pill("ok", "patterns") : pill("idle", "built in") },
+          { label: "Model sees", cell: (e) => `<button class="btn ghost small" data-mode="${esc(e.entity)}">${esc(MODE_LABEL[e.redaction] || "Name tag")}</button>` },
           { label: "Detect", cell: (e) => `<label class="toggle"><input type="checkbox" data-entity="${esc(e.entity)}" ${e.enabled ? "checked" : ""}><span class="switch"></span></label>` },
         ],
         entities
       )}
     </div>`;
 
-  $("#save-threshold").addEventListener("click", async () => {
-    await api("/settings", { method: "PUT", body: { score_threshold: $("#threshold").value } });
-    toast("Confidence saved");
+  $("#save-threshold").addEventListener("click", async (e) => {
+    await busy(e.currentTarget, () => api("/settings", { method: "PUT", body: { score_threshold: $("#threshold").value } }));
+    toast("Saved");
   });
   $$("[data-entity]", el).forEach((cb) =>
     cb.addEventListener("change", async () => {
@@ -697,6 +715,108 @@ async function viewDetection(el) {
       toast(cb.dataset.entity + (cb.checked ? " on" : " off"));
     })
   );
+  $$("[data-mode]", el).forEach((b) =>
+    b.addEventListener("click", () =>
+      redactionModal(entities.find((x) => x.entity === b.dataset.mode))
+    )
+  );
+}
+
+/* The three ways a value can be stood in for. Shared by the entity editor
+   and the pattern editor so both explain it the same way. */
+function redactionFields(current, shape, entity) {
+  return `
+    <label class="field"><span>What the model sees instead</span>
+      <select name="redaction">
+        <option value="tag" ${current === "tag" ? "selected" : ""}>Name tag — &lt;${esc(entity || "TYPE")}_1&gt;</option>
+        <option value="surrogate" ${current === "surrogate" ? "selected" : ""}>Lookalike — a fake value with the same shape</option>
+        <option value="last4" ${current === "last4" ? "selected" : ""}>Last 4 — ••••••3210</option>
+      </select></label>
+    <div class="mode-help" id="mode-help"></div>
+    <div id="shape-block" hidden>
+      <label class="field"><span>Shape</span>
+        <div class="shape-row">
+          <input type="text" class="mono" name="shape" value="${esc(shape || "")}" placeholder="AAAAA9999A" spellcheck="false">
+          <button type="button" class="btn ghost" id="shape-learn">From example</button>
+        </div>
+        <div class="shape-legend">
+          <span><code>A</code> letter</span><span><code>a</code> lower</span>
+          <span><code>9</code> digit</span><span><code>?</code> either</span>
+          <span><code>[2-9]</code> a set</span><span><code>{19}</code> literal</span>
+        </div>
+        <div class="field-note" id="shape-note"></div>
+      </label>
+    </div>
+    <label class="field"><span>Try it on real-looking examples</span>
+      <textarea class="mono" name="samples" style="min-height:64px" placeholder="One value per line"></textarea>
+      <div class="field-note">Use fake values. This is only to preview the replacement.</div></label>
+    <div class="actions" style="margin:-6px 0 12px">
+      <button type="button" class="btn ghost" id="swap-preview">Preview</button>
+    </div>
+    <div id="swap-out"></div>`;
+}
+
+function wireRedaction(form, entity) {
+  const sel = form.redaction;
+  const block = $("#shape-block", form);
+  const help = $("#mode-help", form);
+  const refresh = () => {
+    const mode = sel.value;
+    block.hidden = mode !== "surrogate";
+    help.textContent =
+      mode === "surrogate"
+        ? "The model can count the characters and check the format, so it can answer questions about the value itself. It never sees the real one."
+        : mode === "last4"
+        ? "Enough for a person reading the reply to recognise which record it is. The model cannot reason about the rest."
+        : "The model can refer to it and tell it apart from others, but cannot inspect it. Safest, and the right choice for names and addresses.";
+  };
+  sel.addEventListener("change", refresh);
+  refresh();
+
+  $("#shape-learn", form)?.addEventListener("click", async (e) => {
+    const first = (form.samples.value || "").split("\n").map((x) => x.trim()).filter(Boolean)[0];
+    if (!first) return toast("Put an example in the box below first", true);
+    const r = await busy(e.currentTarget, () => api("/surrogate/infer", { method: "POST", body: { sample: first } }));
+    form.shape.value = r.shape;
+    $("#shape-note", form).textContent = r.error || "";
+    toast("Shape read from your example");
+  });
+
+  $("#swap-preview", form).addEventListener("click", async (e) => {
+    const out = $("#swap-out", form);
+    const samples = (form.samples.value || "").split("\n").map((x) => x.trim()).filter(Boolean);
+    if (!samples.length) return toast("Add an example or two first", true);
+    const r = await busy(e.currentTarget, () =>
+      api("/surrogate/preview", {
+        method: "POST",
+        body: { entity: entity || "SAMPLE", redaction: sel.value, shape: form.shape?.value || "", samples },
+      })
+    );
+    if (r.error) { out.innerHTML = `<div class="notice bad">${esc(r.error)}</div>`; return; }
+    if (form.shape && !form.shape.value && r.shape) form.shape.value = r.shape;
+    out.innerHTML = r.rows
+      .map((row) => `<div class="swap ${esc(sel.value)}">
+        <span class="real">${esc(row.real)}</span>
+        <span class="arrow">→</span>
+        <span class="fake">${esc(row.stand_in)}</span></div>`)
+      .join("");
+  });
+}
+
+async function redactionModal(entity) {
+  openModal({
+    title: `What the model sees for ${entity.entity}`,
+    body: redactionFields(entity.redaction, entity.shape, entity.entity),
+    onReady: (form) => wireRedaction(form, entity.entity),
+    onSave: async (form) => {
+      await api("/entities", {
+        method: "PUT",
+        body: [{ entity: entity.entity, redaction: form.redaction.value, shape: form.shape?.value || "" }],
+      });
+      toast(`${entity.entity} → ${MODE_LABEL[form.redaction.value]}`);
+      go("detection");
+    },
+  });
 }
 
 /* ============================================================= patterns */
@@ -734,6 +854,7 @@ async function viewPatterns(el) {
          { label: "Name", cell: (p) => esc(p.name) },
          { label: "Pattern", cell: (p) => `<code>${esc(p.regex.length > 38 ? p.regex.slice(0, 38) + "…" : p.regex)}</code>` },
          { label: "Check", cell: (p) => (p.validator === "none" ? "—" : pill("info", p.validator)) },
+         { label: "Model sees", cell: (p) => pill(MODE_PILL[p.redaction] || "info", MODE_LABEL[p.redaction] || "Name tag") },
          { label: "Score", num: true, cell: (p) => `<div style="display:flex;align-items:center;gap:8px;justify-content:flex-end"><span>${p.score}</span><span class="bar"><i style="width:${Math.round(p.score * 100)}%"></i></span></div>` },
          { label: "On", cell: (p) => `<label class="toggle"><input type="checkbox" data-toggle="${p.id}" ${p.enabled ? "checked" : ""}><span class="switch"></span></label>` },
          { label: "", cell: (p) => `<button class="btn ghost small" data-edit="${p.id}">Edit</button> <button class="btn danger small" data-del="${p.id}">Delete</button>` },
@@ -805,7 +926,8 @@ function generateModal() {
         patternModal({
           entity: draft.entity, name: draft.name, regex: draft.regex,
           score: draft.score, context: draft.context, validator: "none",
-          enabled: true, _sample: (draft.samples || []).join("\n"),
+          enabled: true, redaction: "tag", shape: "",
+          _sample: (draft.samples || []).join("\n"),
         });
     },
   });
@@ -838,7 +960,8 @@ function patternModal(p) {
       <label class="field"><span>Nearby words that raise confidence</span>
         <input type="text" name="context" value="${esc((p?.context || []).join(", "))}" placeholder="employee, staff, emp id">
         <div class="field-note">Comma separated.</div></label>
-      <label class="toggle"><input type="checkbox" name="enabled" ${p?.enabled !== false ? "checked" : ""}><span class="switch"></span><span>Use this pattern</span></label>`,
+      <label class="toggle" style="margin-bottom:18px"><input type="checkbox" name="enabled" ${p?.enabled !== false ? "checked" : ""}><span class="switch"></span><span>Use this pattern</span></label>
+      ${redactionFields(p?.redaction || "tag", p?.shape || "", p?.entity || "")}`,
     extra: `<div class="tester">
         <div><label class="field" style="margin:0"><span>Sample text</span>
           <textarea id="rx-sample" class="mono" spellcheck="false">${esc(p?._sample || "EMP004512 raised a ticket. Order 100000000 is unrelated.")}</textarea></label></div>
@@ -847,6 +970,11 @@ function patternModal(p) {
           <div class="legend">Green passed the check. Red struck through means the pattern matched but the check rejected it.</div></div>
       </div>`,
     onReady: (form) => {
+      wireRedaction(form, p?.entity || "");
+      // Keep the surrogate preview honest when the entity name changes.
+      form.entity.addEventListener("input", () => {
+        form._entity = form.entity.value.trim().toUpperCase();
+      });
       const run = debounce(async () => {
         const regex = form.regex.value;
         const preview = $("#rx-preview");
@@ -886,6 +1014,8 @@ function patternModal(p) {
         context: form.context.value.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
         validator: form.validator.value,
         enabled: form.enabled.checked,
+        redaction: form.redaction.value,
+        shape: form.shape?.value || "",
       };
       if (p) await api("/patterns/" + p.id, { method: "PUT", body });
       else await api("/patterns", { method: "POST", body });
@@ -1047,9 +1177,9 @@ async function viewKeys(el) {
     isAdmin() ? api("/routes").catch(() => []) : Promise.resolve([]),
   ]);
   el.innerHTML =
-    head("API keys", "Keys your apps use to reach AVRON. They are not your OpenAI or provider keys — AVRON adds the real one for you.") +
+    head("API keys", "Keys your apps use to reach Avron. They are not your OpenAI or provider keys — Avron adds the real one for you.") +
     (data.required
-      ? `<div class="notice good">A key is needed to use AVRON. Requests without one are turned away.</div>`
+      ? `<div class="notice good">A key is needed to use Avron. Requests without one are turned away.</div>`
       : `<div class="notice warn">No key is needed right now, so <strong>anyone who can reach this server can use it</strong> — and spend on your provider account. Create a key, put it in your apps, then switch this on.</div>`) +
     (isAdmin()
       ? `<div class="panel"><div class="panel-body">
@@ -1136,7 +1266,7 @@ function showKey(key) {
   wrap.innerHTML = `<div class="modal" role="dialog" aria-modal="true">
     <div class="modal-head">Your new key</div>
     <div class="modal-body">
-      <div class="notice bad">Copy this now — you will not see it again. AVRON keeps only a scrambled version and cannot show you the original.</div>
+      <div class="notice bad">Copy this now — you will not see it again. Avron keeps only a scrambled version and cannot show you the original.</div>
       <label class="field"><span>Key</span>
         <input type="text" class="mono" id="new-key" readonly value="${esc(key)}"></label>
       <label class="field"><span>Paste this into your app</span>

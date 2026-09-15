@@ -6,9 +6,9 @@
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#08090a">
 <meta name="robots" content="noindex">
-<title>AVRON</title>
+<title>Avron</title>
 <link rel="stylesheet" href="/static/style.css">
-<link rel="icon" href="data:,">
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
 </head>
 <body>
 
@@ -19,7 +19,15 @@
 <template id="tpl-login">
   <div class="login-screen">
     <form class="login-card" id="login-form">
-      <h1>AVRON</h1>
+      <div class="login-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32" fill="none" width="40" height="40">
+          <path d="M16 3.2 4.6 26.4h5.1l2.2-4.7h8.2l2.2 4.7h5.1L16 3.2Z" fill="url(#lg)"/>
+          <path d="M13.5 17.6h5l-2.5-5.4-2.5 5.4Z" fill="var(--bg)"/>
+          <defs><linearGradient id="lg" x1="4.6" y1="3.2" x2="27.4" y2="26.4" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#8FA0FF"/><stop offset="1" stop-color="#4FC3F7"/></linearGradient></defs>
+        </svg>
+      </div>
+      <h1>Avron</h1>
       <p>PII detection and masking for LLM traffic.</p>
       <div id="login-error"></div>
       <label class="field">
@@ -43,14 +51,25 @@
   <div class="shell">
     <div class="topbar">
       <button class="btn ghost small" id="menu-btn" aria-label="Menu">☰</button>
-      <div class="brand"><span class="mark" aria-hidden="true"></span>AVRON</div>
+      <div class="brand">
+        <svg class="mark" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+          <path d="M16 3.2 4.6 26.4h5.1l2.2-4.7h8.2l2.2 4.7h5.1L16 3.2Z" fill="url(#tg)"/>
+          <path d="M13.5 17.6h5l-2.5-5.4-2.5 5.4Z" fill="var(--surface)"/>
+          <defs><linearGradient id="tg" x1="4.6" y1="3.2" x2="27.4" y2="26.4" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#8FA0FF"/><stop offset="1" stop-color="#4FC3F7"/></linearGradient></defs>
+        </svg>Avron</div>
       <div class="spacer"></div>
       <span id="who-mobile" class="field-note" style="margin:0"></span>
     </div>
     <aside class="sidebar" id="sidebar">
       <div class="brand">
-        <span class="mark" aria-hidden="true"></span>
-        <div>AVRON<span>Detection and routing</span></div>
+        <svg class="mark" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+          <path d="M16 3.2 4.6 26.4h5.1l2.2-4.7h8.2l2.2 4.7h5.1L16 3.2Z" fill="url(#sg)"/>
+          <path d="M13.5 17.6h5l-2.5-5.4-2.5 5.4Z" fill="var(--surface)"/>
+          <defs><linearGradient id="sg" x1="4.6" y1="3.2" x2="27.4" y2="26.4" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#8FA0FF"/><stop offset="1" stop-color="#4FC3F7"/></linearGradient></defs>
+        </svg>
+        <div>Avron<span>PII gateway</span></div>
       </div>
       <nav class="nav" id="nav"></nav>
       <div class="sidebar-foot">

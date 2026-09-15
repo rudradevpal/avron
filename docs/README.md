@@ -1,6 +1,6 @@
-# AVRON documentation
+# Avron documentation
 
-AVRON sits between your applications and any OpenAI-compatible model API. It
+Avron sits between your applications and any OpenAI-compatible model API. It
 finds personal data in outbound text, replaces it with placeholders, forwards
 the request, and puts the real values back in the reply. The model never sees
 the data; your code never sees a placeholder.
@@ -23,7 +23,7 @@ the data; your code never sees a placeholder.
 
 Detection is imperfect. Regular expressions miss things that do not match, the
 language model misses things it does not recognise, and both produce false
-positives. AVRON reduces exposure; it does not eliminate it. Benchmark against
+positives. Avron reduces exposure; it does not eliminate it. Benchmark against
 your own labelled data before you rely on it for anything that matters.
 
 The language model detection pass receives text **before** masking. That is

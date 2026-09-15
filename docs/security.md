@@ -1,6 +1,6 @@
 # Security
 
-## What AVRON protects against
+## What Avron protects against
 
 Personal data reaching a model provider in your application's prompts. That is
 the whole scope. It is not a firewall, a DLP suite, or a compliance control.
@@ -34,6 +34,7 @@ placeholders.
 | `crypto_key` | database, encrypted | `encrypt` output unrecoverable |
 | Egress proxy URL | database, encrypted | re-enter |
 | User passwords | database, PBKDF2-SHA256 ×600k | not recoverable by design |
+| Client API keys | database, SHA-256 hash | not recoverable; issue a new one |
 
 `MASTER_KEY` cannot be rotated without re-entering every stored secret; there is
 no re-encryption path. Treat it as permanent.
@@ -45,21 +46,31 @@ one is set and nothing otherwise.
 
 - Session cookies: HttpOnly, SameSite=strict, server-side, expiring.
 - Five failed logins lock an account for five minutes.
-- All accounts are full administrators. There are no read-only roles, so anyone
-  who can sign in can read the egress configuration and change what is masked.
+- Two roles: administrator and member. Members can only manage their own API
+  keys and password. Anyone with an administrator account can read the egress
+  configuration and change what gets masked.
 - **Serve it over HTTPS** and set `COOKIE_SECURE=true`. None of the above helps
   if the session cookie crosses the network in the clear.
 
-## Unauthenticated surfaces
+## Client authentication
 
-`/analyze`, `/anonymize`, `/deanonymize`, `/health` and every proxy endpoint
-have no authentication. They are meant for a private network.
+Avron issues its own API keys. Turn on **Require a key** under API keys and the
+proxy plus the whole masking API refuse requests without a valid one.
 
-`/deanonymize` in particular will decrypt anything encrypted with the current
-key. Do not expose port 8080 to the internet.
+It is off by default so that upgrading does not break existing clients. **While
+it is off, anyone who can reach port 8080 can use your endpoints and your stored
+provider credentials.** That is the single most important thing to fix after a
+first install.
 
-If you need client authentication, put a reverse proxy in front and require a
-header. AVRON does not issue client API keys.
+Keys are stored as SHA-256 hashes and shown once. They can be scoped to
+particular endpoints, given an expiry, disabled without deleting, and revoked.
+Use counts and last-used timestamps tell you which ones are dead.
+
+`/health` stays open for liveness probes and exposes no data beyond
+configuration shape.
+
+`/deanonymize` will decrypt anything encrypted with the current key, so it is
+worth confirming enforcement is on before exposing the port anywhere.
 
 ## Untrusted input
 
@@ -75,9 +86,25 @@ quantifiers are rejected at save time and patterns are capped at 500 characters.
 This is a heuristic, not a proof — a determined operator can still write
 something slow.
 
+## Request inspection
+
+**Audit log → Requests**, when switched on, stores full request and response
+text — unmasked — so you can see what actually went out. This is the one feature
+that deliberately writes personal data to disk.
+
+Encrypted under `MASTER_KEY`, deleted after `capture_days` (default 1), capped
+at `capture_limit` rows, administrators only, and each view is recorded in the
+change log. Off by default. Turn it off again when you are done.
+
+Raising `capture_days` raises your exposure window in direct proportion. A week
+of recorded traffic is a week of unmasked personal data sitting in a file.
+
+If your policy forbids storing this at all, leave `capture_enabled` off and use
+the Playground, which holds nothing.
+
 ## Logging
 
-AVRON does not log message content. It logs counts, provider names, latencies
+Avron does not log message content. It logs counts, provider names, latencies
 and configuration changes.
 
 What does record content: Portainer's log viewer shows whatever any container
@@ -87,6 +114,21 @@ which provider handled what and when.
 
 The audit log keeps the last 2,000 configuration changes with actor and
 timestamp. Latency samples keep the last 5,000 requests with no text.
+
+## Lookalikes
+
+A lookalike is a fake value with the real one's shape, so the model can examine
+it. What keeps it safe, and what does not:
+
+- Keyed per request, so it cannot correlate one request with another.
+- Generated to fail the format's checksum where one exists, so it cannot be a
+  real number.
+- Checked against every other value in the request and every lookalike already
+  issued, so two records never share one.
+- **Formats with no checksum — PAN, IFSC, most national IDs — carry residual
+  risk.** A well-formed lookalike could coincidentally be somebody's real one.
+  This cannot be engineered away; it is the cost of letting the model inspect
+  the value. Use tags where you do not need that.
 
 ## Known weaknesses
 
@@ -101,7 +143,9 @@ timestamp. Latency samples keep the last 5,000 requests with no text.
   personal data.
 - **Portainer's socket mount is root on the host.** If you keep it, bind 9443 to
   localhost or a VPN address.
-- **Single-tenant.** No isolation between users of the same instance.
+- **Single-tenant.** Members are isolated from each other's API keys, but every
+  key reaches the same endpoints and the same provider credentials unless you
+  scope it.
 
 ## Deployment hardening
 

@@ -1,6 +1,6 @@
 # Third-party notices
 
-AVRON is built on open-source components. Their licences are reproduced or
+Avron is built on open-source components. Their licences are reproduced or
 referenced below. Nothing here is legal advice; verify against the versions you
 actually ship.
 
@@ -13,11 +13,11 @@ change between releases — re-check when you upgrade.
 MIT License. Copyright (c) Microsoft Corporation.
 The project is now maintained at <https://github.com/data-privacy-stack/presidio>.
 
-AVRON uses Presidio as a library: its `AnalyzerEngine`, `RecognizerRegistry`,
+Avron uses Presidio as a library: its `AnalyzerEngine`, `RecognizerRegistry`,
 `PatternRecognizer`, `AnonymizerEngine` and `DeanonymizeEngine`, plus the
 built-in recognizers it ships for credit cards, email addresses, IBAN, IP
 addresses, US and UK identifiers and others. The regional pattern packs in
-`avron/patterns.py` are AVRON's own work, registered into Presidio's registry.
+`avron/patterns.py` are Avron's own work, registered into Presidio's registry.
 
 **spaCy** 3.8.x — MIT License. Copyright (c) Explosion AI.
 
@@ -43,7 +43,7 @@ model weights are MIT.
 | click | BSD-3-Clause |
 | PyYAML | MIT |
 
-All are permissive. None impose copyleft obligations on AVRON or on code that
+All are permissive. None impose copyleft obligations on Avron or on code that
 calls it.
 
 ## Console
@@ -67,5 +67,5 @@ MIT and BSD-3-Clause both require that you keep the copyright notice and
 licence text with any copy or substantial portion. Shipping this file alongside
 the software satisfies that for the Python dependencies.
 
-If you publish AVRON itself, fill in the copyright holder in `LICENSE`, or
+If you publish Avron itself, fill in the copyright holder in `LICENSE`, or
 replace it with whatever licence you intend.

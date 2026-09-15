@@ -15,7 +15,7 @@ they are ignored.
 
 ## Endpoints
 
-An endpoint is a path on AVRON that forwards to a pool of providers.
+An endpoint is a path on Avron that forwards to a pool of providers.
 
 | Field | Notes |
 |---|---|
@@ -76,6 +76,15 @@ labels like "PAN" and "SSN" as organisations, which masks the label instead of
 the value; `DATE_TIME` catches every timestamp in a log line and breaks
 scheduling.
 
+### What the model sees instead
+
+Each entity carries a replacement style — `tag`, `surrogate` or `last4` — and,
+for surrogates, a shape. A pattern can override its entity's setting, which is
+what you want when one entity has several patterns but only one of them needs a
+different shape.
+
+Full explanation in [detection.md](detection.md).
+
 ## Detection model
 
 The second pass that finds names and addresses. It is **not** the model that
@@ -100,8 +109,57 @@ Sending container-to-container traffic through an external proxy fails in a way
 that looks like broken DNS. "Check where traffic exits" shows the exit IP with and
 without the proxy side by side.
 
+## API keys
+
+Avron issues its own keys for clients. They are not provider keys: a client
+sends an `avron-…` key, Avron verifies it, consumes it, and substitutes the real
+provider credential on the way out. A leaked client key gets someone access to
+your gateway, not to your OpenAI account.
+
+Any user can create keys under **API keys**. Each key has a name, an optional
+expiry, and an optional endpoint scope. The full value is shown once — only a
+SHA-256 hash is stored. Plain SHA-256 is right here and wrong for passwords: the
+key is 256 bits of machine-generated entropy, so there is nothing to brute
+force and no reason to pay 600,000 PBKDF2 rounds on every proxied request.
+
+The table shows use count and last-used time, so you can tell which keys are
+dead before revoking them.
+
+### Enforcement
+
+`require_client_key` is **off** by default, so an upgrade does not break clients
+already pointed at the gateway. While it is off, anyone who can reach port 8080
+can use your endpoints and your stored provider credentials.
+
+Issue keys first, then turn it on. With it on, the proxy and `/analyze`,
+`/anonymize` and `/deanonymize` all return 401 without a valid key. `/health`
+stays open for probes.
+
+## Retention
+
+Set in the console under Audit log.
+
+| Setting | Default | What it covers |
+|---|---|---|
+| `capture_days` | 1 | How long recorded requests are kept |
+| `capture_limit` | 200 | Hard ceiling on recorded requests |
+| `audit_days` | 90 | How long configuration changes are kept |
+| `audit_limit` | 5,000 | Hard ceiling on configuration changes |
+
+Age and count both apply; whichever trims first wins.
+
 ## Users
 
-All accounts are full administrators; there are no restricted roles. Passwords
-are PBKDF2-SHA256 at 600,000 iterations. Five failed attempts lock an account
-for five minutes.
+Two roles.
+
+| Role | Can do |
+|---|---|
+| Administrator | Everything: endpoints, providers, patterns, entities, egress, users, audit log |
+| Member | Their own API keys and their own password. Nothing else. |
+
+Members get a cut-down console — the configuration sections are not rendered,
+and the API returns 403 if they are requested directly. Give a member role to
+anyone who needs a key but should not be able to change what gets masked.
+
+The last administrator cannot be deleted. Passwords are PBKDF2-SHA256 at 600,000
+iterations, and five failed attempts lock an account for five minutes.

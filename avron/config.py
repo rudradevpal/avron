@@ -125,6 +125,32 @@ class ConfigManager:
         ).fetchall()
         return [r["entity"] for r in rows] or list(ALL_ENTITIES)
 
+    def redaction_map(self) -> dict:
+        """entity -> {"mode": tag|surrogate|last4, "shape": str}.
+
+        Read on every request, so a change in the console takes effect on the
+        next one without a reload.
+        """
+        out = {}
+        for r in db.db().execute(
+            "SELECT entity, redaction, shape FROM entity_toggles"
+        ):
+            out[r["entity"]] = {
+                "mode": r["redaction"] or "tag",
+                "shape": r["shape"] or "",
+            }
+        # A pattern may override its entity. Last one wins, which is fine:
+        # several patterns for one entity should agree on the shape.
+        for r in db.db().execute(
+            "SELECT entity, redaction, shape FROM patterns "
+            "WHERE enabled=1 AND redaction != 'tag'"
+        ):
+            out[r["entity"]] = {
+                "mode": r["redaction"],
+                "shape": r["shape"] or out.get(r["entity"], {}).get("shape", ""),
+            }
+        return out
+
     def threshold(self) -> float:
         try:
             return float(db.get_setting("score_threshold", "0.4"))

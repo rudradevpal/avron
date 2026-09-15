@@ -1,4 +1,4 @@
-"""AVRON — PII detection, masking API, admin console and LLM forward proxy."""
+"""Avron - PII detection, masking API, admin console and LLM forward proxy."""
 
 import logging
 import os
@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("avron")
 
 STATIC = Path(__file__).parent / "static"
-app = FastAPI(title="AVRON", version="2.0", docs_url=None, redoc_url=None)
+app = FastAPI(title="Avron", version="2.0", docs_url=None, redoc_url=None)
 
 anonymizer = AnonymizerEngine()
 deanonymizer = DeanonymizeEngine()
@@ -37,7 +37,7 @@ def require_key(request: Request):
     if auth.client_key_required():
         raise HTTPException(
             status_code=401,
-            detail="A valid AVRON API key is required.",
+            detail="A valid Avron API key is required.",
             headers={"WWW-Authenticate": "Bearer"},
         )
     return None
@@ -65,7 +65,7 @@ def startup():
         logger.warning(
             "\n"
             "==========================================================\n"
-            "  AVRON first-run credentials\n"
+            "  Avron first-run credentials\n"
             "    username: admin\n"
             "    password: %s\n"
             "  Change this immediately at http://<host>:8080/\n"

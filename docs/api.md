@@ -2,6 +2,23 @@
 
 Three surfaces: the transparent proxy, the masking API, and the console API.
 
+## Authentication
+
+Clients authenticate with an Avron key, created under **API keys** in the
+console:
+
+```
+Authorization: Bearer avron-…
+```
+
+`X-API-Key` works too. The key is consumed by Avron and never forwarded — the
+provider credential stored on the endpoint replaces it.
+
+Enforcement is off by default. While off, requests without a key are accepted
+and any `Authorization` header is passed through to the provider unless the
+endpoint has its own stored key. Turn on **Require a key** once your clients are
+issued keys.
+
 ## Proxy
 
 Anything under a configured endpoint prefix is forwarded verbatim — method,
@@ -9,7 +26,7 @@ path, query, body, headers.
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer anything" \
+  -H "Authorization: Bearer avron-YOUR-KEY" \
   -H 'Content-Type: application/json' \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"..."}]}'
 ```
@@ -30,7 +47,8 @@ If a provider key is stored on the endpoint it replaces the client's
 
 ## Masking API
 
-Unauthenticated. Do not expose these ports beyond your network.
+Requires an Avron key when enforcement is on; open otherwise. Do not expose
+these ports beyond your network either way.
 
 ### `POST /analyze`
 
@@ -81,9 +99,12 @@ Everything under `/api` requires a session cookie from `POST /api/login`.
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/api/login`, `/api/logout` | Session |
-| GET | `/api/me` | Current user |
+| GET | `/api/me` | Current user and role |
+| GET/POST/PUT/DELETE | `/api/keys` | Client API keys. Members see only their own. |
 | GET/PUT | `/api/settings` | Global settings; secrets are write-only |
-| GET/PUT | `/api/entities` | Per-entity toggles |
+| GET/PUT | `/api/entities` | Per-entity toggles and replacement style |
+| POST | `/api/surrogate/preview` | What a shape would produce, before saving |
+| POST | `/api/surrogate/infer` | Read a shape off an example |
 | GET/POST/PUT/DELETE | `/api/patterns` | Pattern CRUD |
 | POST | `/api/patterns/test` | Live regex tester |
 | POST | `/api/patterns/generate` | AI draft |
@@ -96,5 +117,6 @@ Everything under `/api` requires a session cookie from `POST /api/login`.
 | POST | `/api/playground` | Run a prompt, see every stage |
 | GET | `/api/analytics` | p50/p95 and tokens per provider |
 | GET | `/api/stats`, `/api/audit` | Counters and change log |
-| GET/POST/DELETE | `/api/users` | Accounts |
+| GET/DELETE | `/api/captures` | Recorded requests; detail at `/api/captures/{id}` decrypts one |
+| GET/POST/DELETE | `/api/users` | Accounts and roles. Administrators only. |
 | POST | `/api/test/detect`, `/api/test/llm`, `/api/test/proxy` | Diagnostics |

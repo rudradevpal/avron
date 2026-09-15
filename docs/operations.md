@@ -31,6 +31,24 @@ Migrations run at startup and are idempotent: columns are added if missing, new
 packs and settings inserted, and corrections applied only to rows still carrying
 their original value. A pattern you edited in the console is never overwritten.
 
+## Retention
+
+Both tabs of the audit log carry their own retention, editable in the console:
+
+| Setting | Default | Limit |
+|---|---|---|
+| `capture_days` | 1 | 1–365 |
+| `capture_limit` | 200 | 10–20,000 |
+| `audit_days` | 90 | 1–3,650 |
+| `audit_limit` | 5,000 | 100–200,000 |
+
+Whichever limit bites first wins. Values outside the range are clamped rather
+than rejected, and unparseable ones fall back to the default, so a bad entry
+cannot stop pruning and let the table grow unbounded.
+
+Latency samples are separate and fixed at the newest 5,000 requests. They hold
+no text.
+
 ## Monitoring
 
 `GET /health` needs no auth and reports engine version, enabled entities,
@@ -54,6 +72,43 @@ Log lines worth alerting on:
 
 `PII span extraction routed via X` records which provider handled a detection
 pass. Provider only — never the text. That is your residency audit trail.
+
+## Request inspection
+
+**Audit log → Requests** can record the last few requests in full: what you
+sent, what the model received, what it replied, what your app got back, and the
+placeholder table — the same four panels as the Playground, but for real
+traffic.
+
+It is off by default, and it should stay off except while you are debugging.
+Recording stores the **unmasked** text at rest, which is precisely what Avron
+exists to avoid.
+
+What limits the exposure:
+
+- Encrypted with `MASTER_KEY`, so the database file alone reveals nothing.
+- Anything older than `capture_days` is deleted (default 1).
+- Only the newest `capture_limit` requests are kept (default 200). That ceiling
+  is a safety net, not a preference — without it a busy gateway left recording
+  could fill the disk before the day is out.
+- Each blob is truncated at 20,000 characters.
+- Administrators only, and every view is written to the change log.
+- **Delete everything recorded** purges immediately.
+
+Failed requests are captured too — a 502 with no trace is the hardest thing to
+debug.
+
+Every proxied request produces a row, so the Requests tab and the dashboard
+counter agree. What varies is how much of it can be stored:
+
+| Request | Stored |
+|---|---|
+| Normal JSON | Everything — both sides, plus placeholders |
+| Streaming | Everything. The deltas are accumulated as they pass through and stored when the stream ends, capped at 20,000 characters. A client that disconnects mid-stream still leaves a record of how far it got. |
+| Non-JSON body (file upload, form post) | Metadata only |
+| Failed | Request side plus the error |
+
+Playground runs are recorded too, tagged `playground (username)`.
 
 ## Troubleshooting
 

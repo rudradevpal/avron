@@ -51,7 +51,7 @@ def bearer_from(request: Request) -> str:
 
 
 def verify_api_key(request: Request) -> Optional[dict]:
-    """Resolve an AVRON key. Returns the key row, or None if it is absent,
+    """Resolve an Avron key. Returns the key row, or None if it is absent,
     unknown, disabled or expired."""
     token = bearer_from(request)
     if not token.startswith(KEY_PREFIX):

@@ -55,7 +55,7 @@ password is shown once and is not recoverable from the database.
 ## Networking
 
 The compose file publishes 8080 on all interfaces and joins no custom network.
-If AVRON needs to reach a model container you already run, either add it to that
+If Avron needs to reach a model container you already run, either add it to that
 stack's network or use the host address.
 
 Bind the port to localhost or a private address if this machine is exposed:
@@ -75,7 +75,7 @@ No database server, no queue, no cache. Configuration lives in a single SQLite
 file under `/root/docker-storage/avron/data`.
 
 Model providers are configured in the console, not the compose file — point
-AVRON at OpenAI, a local Ollama, or anything else that speaks the OpenAI wire
+Avron at OpenAI, a local Ollama, or anything else that speaks the OpenAI wire
 format.
 
 ## MASTER_KEY

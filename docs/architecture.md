@@ -4,7 +4,7 @@
 
 Detection is [Microsoft Presidio](https://github.com/data-privacy-stack/presidio)
 (MIT) driving [spaCy](https://spacy.io) (MIT) with the `en_core_web_lg` model.
-AVRON supplies the regional pattern packs, the checksum validators, the
+Avron supplies the regional pattern packs, the checksum validators, the
 placeholder vault, the proxy and the console. Presidio supplies the analyzer,
 the recognizer registry, the context-aware scoring, the anonymizer operators and
 the built-in recognizers for cards, email, IBAN, IP and several national IDs.
@@ -15,7 +15,7 @@ Full attribution in [../NOTICE.md](../NOTICE.md).
 
 ```
                  ┌──────────────────────────────────────────────┐
-  your app ────► │  AVRON                            :8080       │
+  your app ────► │  Avron                            :8080       │
                  │                                              │
                  │   /v1/*       transparent proxy, masked      │
                  │   /analyze    detection only                 │
@@ -58,8 +58,11 @@ external database, queue or cache.
 
 ## Key design decisions
 
-**Placeholders are indexed, not flat.** `<PERSON>` for everyone makes the model
-conflate people. Numbering them preserves identity and coreference.
+**Stand-ins are one-to-one, never many-to-one.** `<PERSON>` for everyone makes
+the model conflate people. Tags are numbered; lookalikes are checked against
+every value already issued; a `last4` that would collide falls back to a tag.
+Two real values sharing one stand-in would merge two people's records, so the
+code degrades to a less useful stand-in rather than a wrong one.
 
 **The vault is per-request and in memory.** Nothing is persisted, so a database
 compromise does not expose mappings. The trade-off: you cannot re-identify an
@@ -67,7 +70,7 @@ old response. Use `/anonymize` with the `encrypt` operator if you need that.
 
 **Validators only reject.** Presidio promotes a `True` from `validate_result` to
 the maximum score, which flattens every checksummed pattern to 1.0 and makes
-overlaps arbitrary. AVRON's validators return `None` on success, so the score
+overlaps arbitrary. Avron's validators return `None` on success, so the score
 still reflects pattern specificity plus context.
 
 **Configuration is hot-reloaded atomically.** Saving a pattern builds a fresh
@@ -84,7 +87,8 @@ so `/api`, `/health` and the static mount always win over the catch-all.
 | `main.py` | App wiring, startup, masking API, overlap dedupe |
 | `openai_proxy.py` | Catch-all proxy, masking, failover, streaming |
 | `balancer.py` | Pool ordering, health, cooldown, in-flight tracking |
-| `vault.py` | Placeholder allocation and restoration |
+| `vault.py` | Stand-in allocation and restoration |
+| `surrogate.py` | Shape parsing, keyed lookalike generation, checksum breaking |
 | `patterns.py` | Seed patterns, packs, checksum validators |
 | `config.py` | Live engine, hot reload, endpoint/pack lookups |
 | `db.py` | SQLite schema, migrations, encryption, samples |

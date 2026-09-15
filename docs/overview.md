@@ -14,7 +14,9 @@ have a disclosure.
 
 ## The approach
 
-AVRON replaces each distinct value with a stable, numbered placeholder.
+Avron replaces each distinct value with a stable stand-in, and you choose what
+kind per data type: a numbered tag, a lookalike with the same shape, or a masked
+tail.
 
 ```
 in   Priya Raghunathan (PAN ABCPE1234F) escalated to Mohammed Ashraf.

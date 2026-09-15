@@ -109,6 +109,9 @@ CREATE INDEX IF NOT EXISTS idx_upstreams_route ON upstreams(route_id);
 CREATE TABLE IF NOT EXISTS patterns (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     pack       TEXT NOT NULL DEFAULT 'custom',
+    -- How a match is replaced: tag | surrogate | last4
+    redaction  TEXT NOT NULL DEFAULT 'tag',
+    shape      TEXT NOT NULL DEFAULT '',
     entity     TEXT NOT NULL,
     name       TEXT NOT NULL,
     regex      TEXT NOT NULL,
@@ -136,8 +139,11 @@ CREATE TABLE IF NOT EXISTS samples (
 );
 CREATE INDEX IF NOT EXISTS idx_samples_up ON samples(upstream_id, id);
 CREATE TABLE IF NOT EXISTS entity_toggles (
-    entity  TEXT PRIMARY KEY,
-    enabled INTEGER NOT NULL DEFAULT 1
+    entity    TEXT PRIMARY KEY,
+    enabled   INTEGER NOT NULL DEFAULT 1,
+    -- Entity-level override. Patterns inherit it unless they set their own.
+    redaction TEXT NOT NULL DEFAULT 'tag',
+    shape     TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS audit (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -193,7 +199,7 @@ DEFAULT_SETTINGS = {
     "proxy_enabled": "false",
     "proxy_url": "",  # stored encrypted, carries credentials
     "proxy_bypass": "localhost,127.0.0.1,avron",
-    # When on, proxy and masking requests need an AVRON key. Off by default so
+    # When on, proxy and masking requests need an Avron key. Off by default so
     # an upgrade does not break clients that are already pointed at it.
     "require_client_key": "false",
     # Request inspection. Off by default: it stores unmasked text at rest,
@@ -428,6 +434,17 @@ def _migrate() -> None:
         )
         db().execute("DELETE FROM settings WHERE key='capture_minutes'")
 
+    for table, col, default in (
+        ("patterns", "redaction", "'tag'"), ("patterns", "shape", "''"),
+        ("entity_toggles", "redaction", "'tag'"), ("entity_toggles", "shape", "''"),
+    ):
+        cols_now = {r["name"] for r in db().execute(f"PRAGMA table_info({table})")}
+        if col not in cols_now:
+            db().execute(
+                f"ALTER TABLE {table} ADD COLUMN {col} TEXT NOT NULL "
+                f"DEFAULT {default}"
+            )
+
     pcols = {r["name"] for r in db().execute("PRAGMA table_info(patterns)")}
     if "pack" not in pcols:
         db().execute(
@@ -513,6 +530,8 @@ def init(seed_recognizers: List[dict], all_entities: List[str]) -> Optional[str]
         # value and makes the prompt unreadable to the chat model.
         from patterns import ENTITY_PACK, OFF_BY_DEFAULT, PACKS
 
+        from surrogate import DEFAULT_SHAPES
+
         for entity in all_entities:
             pack = ENTITY_PACK.get(entity)
             if entity in OFF_BY_DEFAULT:
@@ -522,8 +541,9 @@ def init(seed_recognizers: List[dict], all_entities: List[str]) -> Optional[str]
             else:
                 on = 1
             db().execute(
-                "INSERT OR IGNORE INTO entity_toggles(entity,enabled) VALUES(?,?)",
-                (entity, on),
+                "INSERT OR IGNORE INTO entity_toggles(entity,enabled,redaction,"
+                "shape) VALUES(?,?,?,?)",
+                (entity, on, "tag", DEFAULT_SHAPES.get(entity, "")),
             )
 
         # ---- built-in patterns, grouped into packs, editable ----

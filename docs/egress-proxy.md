@@ -1,6 +1,6 @@
 # Outbound proxy
 
-Optional. Routes every call AVRON makes — the detection model, all providers,
+Optional. Routes every call Avron makes — the detection model, all providers,
 and both connection tests — through an HTTP proxy, so provider traffic leaves
 from one address you control.
 
@@ -8,7 +8,7 @@ Reasons to bother: a fixed egress IP for a provider's allow-list, reaching a
 provider from a permitted region, or separating model traffic from the rest of
 your outbound.
 
-AVRON does not ship a proxy. Point it at whatever you already run — Squid,
+Avron does not ship a proxy. Point it at whatever you already run — Squid,
 HAProxy, a cloud NAT gateway, a corporate egress proxy.
 
 ## Configuring it
@@ -68,5 +68,5 @@ provider handled what.
 **Node's built-in `fetch` ignores `HTTPS_PROXY`.** Setting the environment
 variable does nothing for an application using `fetch` without an explicit
 `ProxyAgent`. If a Node-based upstream seems to ignore your proxy, use that
-application's own proxy setting instead. AVRON passes the proxy explicitly to
+application's own proxy setting instead. Avron passes the proxy explicitly to
 httpx, so its Egress setting always applies.

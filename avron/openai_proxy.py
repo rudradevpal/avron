@@ -166,7 +166,7 @@ async def proxy(full_path: str, request: Request):
             content={"error": "No endpoint configured for this path"},
         )
 
-    # An AVRON key authenticates the caller and is consumed here; it is never
+    # An Avron key authenticates the caller and is consumed here; it is never
     # forwarded. A provider key stored on the endpoint replaces it.
     client_key = auth.verify_api_key(request)
     if client_key:
@@ -180,7 +180,7 @@ async def proxy(full_path: str, request: Request):
     elif auth.client_key_required():
         return JSONResponse(
             status_code=401,
-            content={"error": "A valid AVRON API key is required.",
+            content={"error": "A valid Avron API key is required.",
                      "hint": "Send it as: Authorization: Bearer avron-..."},
             headers={"WWW-Authenticate": "Bearer"},
         )
@@ -206,7 +206,7 @@ async def proxy(full_path: str, request: Request):
 
     # Mask once, not per attempt: the same masked body is reused on retry so a
     # failover cannot produce different placeholders for the same values.
-    vault = Vault()
+    vault = Vault(config.redaction_map())
     masked = None
     if body is not None:
         masked = await _mask_body(rest, body, vault, route)
